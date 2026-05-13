@@ -90,7 +90,65 @@ Connect-MgGraph -Scopes 'AppRoleAssignment.ReadWrite.All','Application.Read.All'
 
 - Run the workflow once on demand (**Portal → Logic App → Run Trigger → Recurrence**).
 - Check the inbox for the dry-run report.
-- When the report looks right, redeploy with `-DryRun $false`, or flip the workflow parameter directly in the portal.
+- When the report looks right, change `dryRun` to `false` (see *Changing parameters* below).
+
+## Changing parameters after deployment
+
+Workflow parameters are baked into the Logic App at deploy time. There are two supported ways to change them.
+
+### Option A — Redeploy (recommended for repeatable / IaC flows)
+
+Re-run `Deploy.ps1` with the new values. Any value passed on the command line **overrides** what's in `azuredeploy.parameters.json`.
+
+```powershell
+# Go live (turn off dry run)
+./scripts/Deploy.ps1 `
+    -ResourceGroupName   rg-entra-hygiene `
+    -SubscriptionId      <subscription-id> `
+    -EmailFromUpn        admin@yourtenant.com `
+    -EmailToRecipients   'admin@yourtenant.com;security@yourtenant.com' `
+    -DryRun              $false
+
+# Loosen the disable threshold to 60 days, push delete to 60+30=90
+./scripts/Deploy.ps1 `
+    -ResourceGroupName   rg-entra-hygiene `
+    -SubscriptionId      <subscription-id> `
+    -EmailFromUpn        admin@yourtenant.com `
+    -EmailToRecipients   'admin@yourtenant.com' `
+    -StaleThresholdDays  60 `
+    -DisabledDeletionThresholdDays 30
+```
+
+> **Gotcha:** if you forget to pass an override, the value from `azuredeploy.parameters.json` is used. Edit the file *and* redeploy if you want a permanent default change.
+
+For long-term changes, edit `azuredeploy.parameters.json` directly and commit; future deploys (with no overrides) will pick it up.
+
+### Option B — Edit live in the portal (no redeploy)
+
+Useful for one-off tweaks or to flip `dryRun` quickly without a pipeline run.
+
+1. Azure portal → **Logic App** → *la-entra-device-hygiene* → **Logic app code view**.
+2. Scroll to the bottom; under `parameters`, change the `value` for the parameter you want.
+   ```jsonc
+   "parameters": {
+     "dryRun":            { "value": false },
+     "emailFromUpn":      { "value": "admin@yourtenant.com" },
+     "staleThresholdDays":{ "value": 60 }
+   }
+   ```
+3. **Save**.
+4. Run the workflow on demand to confirm (**Run Trigger → Recurrence**).
+
+Changes made in the portal will be **overwritten on the next ARM redeploy**, so mirror anything important into `azuredeploy.parameters.json`.
+
+### Forcing a new managed-identity token
+
+Managed-identity tokens are cached up to ~24 hours. After granting new Graph roles, force a refresh:
+
+```powershell
+az logic workflow update -g rg-entra-hygiene -n la-entra-device-hygiene --state Disabled
+az logic workflow update -g rg-entra-hygiene -n la-entra-device-hygiene --state Enabled
+```
 
 ## Safety defaults
 
