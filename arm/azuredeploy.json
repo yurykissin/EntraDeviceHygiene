@@ -343,8 +343,20 @@
               "type": "Compose",
               "inputs": "<html><body style=\"font-family:Segoe UI,Arial,sans-serif;color:#222\"><h2>Entra Device Hygiene Report</h2><p><b>Run date (UTC):</b> @{formatDateTime(utcNow(),'yyyy-MM-dd HH:mm')}<br/><b>Mode:</b> @{if(parameters('dryRun'),'DRY RUN (no changes made)','LIVE')}<br/><b>Disable threshold:</b> @{parameters('staleThresholdDays')} days inactive<br/><b>Delete threshold:</b> @{add(parameters('staleThresholdDays'), parameters('disabledDeletionThresholdDays'))} days inactive (and already disabled)</p><h3>Summary</h3><ul><li><b>Total devices in tenant:</b> @{coalesce(body('Get_Total_Device_Count')?['@@odata.count'], 'unknown')}</li><li><b>Devices disabled this run:</b> @{length(variables('disabledList'))}</li><li><b>Devices deleted this run:</b> @{length(variables('deletedList'))}</li><li><b>Errors:</b> @{length(variables('errorList'))}</li></ul><h3>Disabled devices</h3>@{if(equals(length(variables('disabledList')),0),'<p><i>None</i></p>',body('HTML_Disabled_Table'))}<h3>Deleted devices</h3>@{if(equals(length(variables('deletedList')),0),'<p><i>None</i></p>',body('HTML_Deleted_Table'))}<h3>Errors</h3>@{if(equals(length(variables('errorList')),0),'<p><i>None</i></p>',string(variables('errorList')))}<hr/><p style=\"color:#888;font-size:11px\">Sent by Logic App @{workflow().name}.</p></body></html>"
             },
-            "Send_Report_Email": {
+            "Build_Recipients": {
               "runAfter": { "Compose_EmailBody": [ "Succeeded" ] },
+              "type": "Select",
+              "inputs": {
+                "from": "@split(parameters('emailToRecipients'), ';')",
+                "select": {
+                  "emailAddress": {
+                    "address": "@trim(item())"
+                  }
+                }
+              }
+            },
+            "Send_Report_Email": {
+              "runAfter": { "Build_Recipients": [ "Succeeded" ] },
               "type": "Http",
               "inputs": {
                 "method": "POST",
@@ -357,7 +369,7 @@
                       "contentType": "HTML",
                       "content": "@{outputs('Compose_EmailBody')}"
                     },
-                    "toRecipients": "@map(split(parameters('emailToRecipients'), ';'), item(), json(concat('{\"emailAddress\":{\"address\":\"', trim(item()), '\"}}')))"
+                    "toRecipients": "@body('Build_Recipients')"
                   },
                   "saveToSentItems": true
                 },
