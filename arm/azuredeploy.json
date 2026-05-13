@@ -101,7 +101,7 @@
                 "uri": "@{concat(parameters('graphBaseUri'), '/devices')}",
                 "queries": {
                   "$select": "id,displayName,deviceId,approximateLastSignInDateTime,accountEnabled,trustType,physicalIds,operatingSystem",
-                  "$filter": "@{concat('approximateLastSignInDateTime le ', outputs(''Compute_Cutoff''))}",
+                  "$filter": "@{concat('approximateLastSignInDateTime le ', outputs('Compute_Cutoff'))}",
                   "$top": "999"
                 },
                 "authentication": {
