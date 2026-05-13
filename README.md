@@ -160,3 +160,31 @@ az logic workflow update -g rg-entra-hygiene -n la-entra-device-hygiene --state 
 
 - Single Graph page (`$top=999`); no `@odata.nextLink` follow yet. Fine for most tenants; add paging if you exceed 999 candidates in either bucket per run.
 - No `disabledDateTime` exists on the device object, so the delete criterion uses `approximateLastSignInDateTime` past the combined cutoff. In practice this means a device disabled by this workflow becomes deletable once it has been inactive for the *sum* of both thresholds.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+## Disclaimer
+
+This ARM template is provided **"as is"**, without warranties or guarantees of any kind. Use at your own risk. You are responsible for reviewing, validating, and testing this template in a non‑production environment before deploying it to production. The author assumes no liability for resource costs, configuration issues, or service disruptions resulting from the use of this template.
+
+## Security Considerations
+
+- Review all resource configurations before deployment.
+- Validate role assignments, network rules, and identity configurations.
+- Confirm compliance with your organization's security and governance standards.
+- Ensure secrets/keys are not hard‑coded in templates or parameter files.
+
+## Contributing
+
+Contributions are welcome! When contributing:
+
+- Do not include sensitive information.
+- Ensure resource configurations follow Azure best practices.
+- Confirm the template passes ARM validation (`az deployment group validate ...`).
+- Follow the Code of Conduct (below).
+
+## Code of Conduct
+
+This project adopts the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/).
