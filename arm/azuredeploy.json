@@ -188,7 +188,7 @@
                       {
                         "or": [
                           { "equals": [ "@parameters('excludeAutopilot')", false ] },
-                          { "equals": [ "@length(filter(coalesce(items('Process_Disable_Candidates')?['physicalIds'], createArray()), startsWith(toLower(item()), '[ztdid]')))", 0 ] }
+                          { "not": { "contains": [ "@toLower(string(coalesce(items('Process_Disable_Candidates')?['physicalIds'], createArray())))", "[[ztdid]" ] } }
                         ]
                       }
                     ]
@@ -265,7 +265,7 @@
                       {
                         "or": [
                           { "equals": [ "@parameters('excludeAutopilot')", false ] },
-                          { "equals": [ "@length(filter(coalesce(items('Process_Delete_Candidates')?['physicalIds'], createArray()), startsWith(toLower(item()), '[ztdid]')))", 0 ] }
+                          { "not": { "contains": [ "@toLower(string(coalesce(items('Process_Delete_Candidates')?['physicalIds'], createArray())))", "[[ztdid]" ] } }
                         ]
                       }
                     ]
