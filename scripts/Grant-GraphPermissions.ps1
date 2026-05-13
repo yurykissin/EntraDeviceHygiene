@@ -4,7 +4,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)] [string]$ManagedIdentityPrincipalId,
-    [string[]]$GraphAppRoles = @('Device.Read.All','GroupMember.ReadWrite.All')
+    [string[]]$GraphAppRoles = @('Device.ReadWrite.All','Mail.Send')
 )
 
 $ErrorActionPreference = 'Stop'

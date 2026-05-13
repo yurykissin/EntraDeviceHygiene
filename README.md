@@ -1,91 +1,104 @@
 # Entra Device Hygiene
 
-Automated stale-device detection for Microsoft Entra ID using a scheduled Azure Logic App and Microsoft Graph.
+Automated stale-device lifecycle for Microsoft Entra ID using a scheduled Azure Logic App and Microsoft Graph. **One workflow** disables stale devices, deletes ones that have been disabled long enough, and emails an HTML report.
 
-## What it does
+## What it does (per run)
 
-1. **Logic App** runs on a schedule (default: daily).
-2. Queries Microsoft Graph for devices whose `approximateLastSignInDateTime` is older than `staleThresholdDays` (default: 90).
-3. Filters out **Autopilot** devices (`physicalIds` containing `[ZTDID]`) and **hybrid-joined** devices (`trustType = ServerAd`) by default.
-4. Adds the remaining candidates to a **review security group** so admins can verify before any disable/delete action.
-5. Runs in **dry-run mode by default** — set `dryRun = false` to enable group writes.
+1. **Total tenant device count** — `GET /devices/$count`.
+2. **Disable stale devices** — `accountEnabled=true` AND `approximateLastSignInDateTime` older than `staleThresholdDays` (default **30**) → `PATCH accountEnabled=false`.
+3. **Delete long-disabled devices** — `accountEnabled=false` AND `approximateLastSignInDateTime` older than `staleThresholdDays + disabledDeletionThresholdDays` (default **30 + 30 = 60**) → `DELETE`.
+4. **Skip** Autopilot devices (`[ZTDID]` in `physicalIds`) and hybrid-joined devices (`trustType = ServerAd`) by default.
+5. **Email an HTML report** to the configured recipients via Graph `sendMail`, including: total devices, count disabled, count deleted, full table of each, and any errors.
 
-Disable / delete stages are intentionally **not** part of this template; they should be a separate, gated workflow that operates on the review group after human approval.
+`dryRun = true` (the default) sends the report **without making changes**.
 
 ## Layout
 
 ```
 arm/
   azuredeploy.json              # Logic App + system-assigned MI
-  azuredeploy.parameters.json   # Tweakables (threshold, schedule, group, dryRun)
+  azuredeploy.parameters.json
 scripts/
-  Test-Prerequisites.ps1        # Checks PS version, az CLI, required modules (no duplicate installs)
-  Bootstrap-ReviewGroup.ps1     # Creates the Entra review group, returns ObjectId
-  Grant-GraphPermissions.ps1    # Grants Device.Read.All + GroupMember.ReadWrite.All to the Logic App MI
-  Deploy.ps1                    # az deployment group create wrapper
+  Test-Prerequisites.ps1        # PS version, az CLI, required Graph modules
+  Grant-GraphPermissions.ps1    # Device.ReadWrite.All + Mail.Send to the MI
+  Deploy.ps1                    # az deployment wrapper
 ```
+
+## Parameters
+
+| Name                            | Default          | Notes |
+|---------------------------------|------------------|-------|
+| `staleThresholdDays`            | 30               | Inactivity threshold to **disable** a device. Override at deploy time. |
+| `disabledDeletionThresholdDays` | 30               | Extra inactivity beyond `staleThresholdDays` after which a disabled device is **deleted**. |
+| `scheduleFrequency` / `scheduleInterval` | Day / 1 | Recurrence. |
+| `emailFromUpn`                  | — (required)     | Sender mailbox UPN. The MI needs `Mail.Send` (optionally scoped via an ApplicationAccessPolicy). |
+| `emailToRecipients`             | — (required)     | Semicolon-separated recipient list. |
+| `excludeAutopilot`              | true             | Skip ZTDID devices. |
+| `excludeHybridJoined`           | true             | Skip `trustType = ServerAd` (clean up via on-prem AD instead). |
+| `dryRun`                        | true             | When true: no PATCH / DELETE, only the report is sent. |
+
+Override any default at deploy time, e.g. `-StaleThresholdDays 60`.
+
+## Required Graph application permissions
+
+Granted to the Logic App's **system-assigned managed identity**:
+
+| Permission             | Why |
+|------------------------|-----|
+| `Device.ReadWrite.All` | List + disable + delete device objects |
+| `Mail.Send`            | Send the HTML report via `/users/{from}/sendMail` |
+
+`Grant-GraphPermissions.ps1` assigns these. Without them you'll see `Authorization_RequestDenied` in the run history.
+
+> Tip: scope `Mail.Send` to just the sender mailbox with an `New-ApplicationAccessPolicy` in Exchange Online so the MI can only send as that one identity.
 
 ## Deployment
 
-The flow has three sign-ins because the steps target different control planes (Graph for the group, ARM for the Logic App, Graph again for the app-role grant).
+The flow targets three control planes in order: ARM for the Logic App, Microsoft Graph for the role grant, then back to the Logic App to flip `dryRun` off when you're ready.
 
-### 0. Verify prerequisites (recommended)
+### 0. Verify prerequisites
 
 ```powershell
 ./scripts/Test-Prerequisites.ps1            # report only
 ./scripts/Test-Prerequisites.ps1 -Install   # install missing modules
 ```
 
-### 1. Create the review group (one-time, Microsoft Graph)
-
-```powershell
-Connect-MgGraph -Scopes 'Group.ReadWrite.All'
-$groupId = ./scripts/Bootstrap-ReviewGroup.ps1
-$groupId   # save this; you'll pass it to step 2
-```
-
-### 2. Deploy the Logic App (Azure ARM)
+### 1. Deploy the Logic App
 
 ```powershell
 az login
+
 ./scripts/Deploy.ps1 `
-    -ResourceGroupName    rg-entra-hygiene `
-    -SubscriptionId       <subscription-id> `
-    -ReviewGroupObjectId  $groupId
+    -ResourceGroupName   rg-entra-hygiene `
+    -SubscriptionId      <subscription-id> `
+    -EmailFromUpn        reports@yourtenant.onmicrosoft.com `
+    -EmailToRecipients   'admin@yourtenant.com;security@yourtenant.com'
 ```
 
-`Deploy.ps1` writes the deployment outputs, including the Logic App's **managedIdentityPrincipalId** — copy it for the next step.
+Optional overrides: `-StaleThresholdDays 60`, `-DisabledDeletionThresholdDays 60`, `-DryRun $false`.
 
-### 3. Grant Graph permissions to the managed identity (Microsoft Graph)
+Copy the **`managedIdentityPrincipalId`** value from the outputs for the next step.
+
+### 2. Grant Graph permissions to the managed identity
 
 ```powershell
 Connect-MgGraph -Scopes 'AppRoleAssignment.ReadWrite.All','Application.Read.All'
-./scripts/Grant-GraphPermissions.ps1 -ManagedIdentityPrincipalId <principalId-from-step-2>
+./scripts/Grant-GraphPermissions.ps1 -ManagedIdentityPrincipalId <principalId-from-step-1>
 ```
 
-After this completes, the Logic App's first scheduled run will succeed. To trigger it manually, open the workflow in the Azure portal and choose **Run Trigger → Recurrence**.
+### 3. Validate, then go live
 
-## Parameters
+- Run the workflow once on demand (**Portal → Logic App → Run Trigger → Recurrence**).
+- Check the inbox for the dry-run report.
+- When the report looks right, redeploy with `-DryRun $false`, or flip the workflow parameter directly in the portal.
 
-| Name                 | Default | Notes |
-|----------------------|---------|-------|
-| `staleThresholdDays` | 90      | Cutoff for `approximateLastSignInDateTime` |
-| `scheduleFrequency`  | Day     | Hour / Day / Week / Month |
-| `scheduleInterval`   | 1       | Combined with frequency |
-| `excludeAutopilot`   | true    | Skip devices with a ZTDID |
-| `excludeHybridJoined`| true    | Skip `trustType = ServerAd` (clean up in on-prem AD) |
-| `dryRun`             | true    | When true, only logs candidates |
-| `reviewGroupObjectId`| —       | Required; from `Bootstrap-ReviewGroup.ps1` |
+## Safety defaults
 
-## Required Graph permissions (application)
+- `dryRun = true` — no writes until you flip it.
+- Autopilot and Hybrid-joined excluded.
+- Delete only happens after a device is already disabled *and* an additional inactivity window has elapsed — so a missed run won't cascade into instant deletion.
 
-- `Device.Read.All` — list devices
-- `GroupMember.ReadWrite.All` — add to review group
+## Known limitations
 
-These are granted to the Logic App's **system-assigned managed identity** by `Grant-GraphPermissions.ps1`.
-
-## Roadmap (next phases)
-
-- Phase 2: Reporting workflow — email/Teams summary of new candidates with deep-links.
-- Phase 3: Approval-gated disable workflow (operates on the review group, with rollback window).
-- Phase 4: Delete workflow with Autopilot/Hybrid safety net and audit log export.
+- Single Graph page (`$top=999`); no `@odata.nextLink` follow yet. Fine for most tenants; add paging if you exceed 999 candidates in either bucket per run.
+- No `disabledDateTime` exists on the device object, so the delete criterion uses `approximateLastSignInDateTime` past the combined cutoff. In practice this means a device disabled by this workflow becomes deletable once it has been inactive for the *sum* of both thresholds.

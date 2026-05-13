@@ -13,10 +13,14 @@
 param(
     [Parameter(Mandatory)] [string]$ResourceGroupName,
     [Parameter(Mandatory)] [string]$SubscriptionId,
+    [Parameter(Mandatory)] [string]$EmailFromUpn,
+    [Parameter(Mandatory)] [string]$EmailToRecipients,
     [string]$Location           = 'westeurope',
     [string]$TemplateFile       = (Join-Path $PSScriptRoot '..' 'arm' 'azuredeploy.json'),
     [string]$ParametersFile     = (Join-Path $PSScriptRoot '..' 'arm' 'azuredeploy.parameters.json'),
-    [string]$ReviewGroupObjectId
+    [int]$StaleThresholdDays,
+    [int]$DisabledDeletionThresholdDays,
+    [Nullable[bool]]$DryRun
 )
 
 $ErrorActionPreference = 'Stop'
@@ -42,9 +46,15 @@ $azArgs = @(
     '--template-file',  $TemplateFile,
     '--parameters',     "@$ParametersFile"
 )
-if ($ReviewGroupObjectId) {
-    $azArgs += @('--parameters', "reviewGroupObjectId=$ReviewGroupObjectId")
-}
+$overrides = @(
+    "emailFromUpn=$EmailFromUpn",
+    "emailToRecipients=$EmailToRecipients"
+)
+if ($PSBoundParameters.ContainsKey('StaleThresholdDays'))            { $overrides += "staleThresholdDays=$StaleThresholdDays" }
+if ($PSBoundParameters.ContainsKey('DisabledDeletionThresholdDays')) { $overrides += "disabledDeletionThresholdDays=$DisabledDeletionThresholdDays" }
+if ($PSBoundParameters.ContainsKey('DryRun'))                        { $overrides += ("dryRun={0}" -f $DryRun.ToString().ToLower()) }
+
+$azArgs += @('--parameters') + $overrides
 $azArgs += @('--query', 'properties.outputs', '--output', 'json')
 
 Write-Host "Deploying ARM template..." -ForegroundColor Cyan

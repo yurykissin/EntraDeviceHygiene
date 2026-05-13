@@ -2,56 +2,61 @@
   "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
   "contentVersion": "1.0.0.0",
   "metadata": {
-    "description": "Entra Device Hygiene - deploys a scheduled Logic App (system-assigned managed identity) that queries Microsoft Graph for stale devices and adds them to a review group. The review group must already exist (or be created via the companion bootstrap script) and its objectId is passed in. Graph application permissions (Device.Read.All, GroupMember.ReadWrite.All) must be granted to the Logic App's managed identity out of band."
+    "description": "Entra Device Hygiene - scheduled Logic App that disables stale devices and deletes devices that have been disabled long enough, then emails an HTML report. Uses system-assigned managed identity calling Microsoft Graph."
   },
   "parameters": {
     "logicAppName": {
       "type": "string",
-      "defaultValue": "la-entra-device-hygiene",
-      "metadata": { "description": "Name of the Logic App workflow." }
+      "defaultValue": "la-entra-device-hygiene"
     },
     "location": {
       "type": "string",
-      "defaultValue": "[resourceGroup().location]",
-      "metadata": { "description": "Azure region." }
+      "defaultValue": "[resourceGroup().location]"
     },
     "staleThresholdDays": {
       "type": "int",
-      "defaultValue": 90,
-      "minValue": 30,
-      "maxValue": 730,
-      "metadata": { "description": "Devices whose approximateLastSignInDateTime is older than this many days are considered stale." }
+      "defaultValue": 30,
+      "minValue": 1,
+      "maxValue": 3650,
+      "metadata": { "description": "A device is considered stale (and will be disabled) when approximateLastSignInDateTime is older than this many days. Override at deploy time as needed." }
+    },
+    "disabledDeletionThresholdDays": {
+      "type": "int",
+      "defaultValue": 30,
+      "minValue": 1,
+      "maxValue": 3650,
+      "metadata": { "description": "A disabled device is deleted when it has been inactive for staleThresholdDays + this many additional days." }
     },
     "scheduleFrequency": {
       "type": "string",
       "defaultValue": "Day",
-      "allowedValues": [ "Hour", "Day", "Week", "Month" ],
-      "metadata": { "description": "Recurrence frequency for the Logic App." }
+      "allowedValues": [ "Hour", "Day", "Week", "Month" ]
     },
     "scheduleInterval": {
       "type": "int",
       "defaultValue": 1,
-      "minValue": 1,
-      "metadata": { "description": "Recurrence interval (combined with scheduleFrequency)." }
+      "minValue": 1
     },
-    "reviewGroupObjectId": {
+    "emailFromUpn": {
       "type": "string",
-      "metadata": { "description": "Object ID of the Entra security group that will hold stale devices for review. Group must be security-enabled and assignable. Create it ahead of time (see scripts/Bootstrap-ReviewGroup.ps1)." }
+      "metadata": { "description": "User Principal Name of the mailbox that sends the report. The Logic App's managed identity must have Mail.Send permission scoped to (or unrestricted over) this mailbox." }
+    },
+    "emailToRecipients": {
+      "type": "string",
+      "metadata": { "description": "Semicolon-separated list of recipient email addresses for the report." }
     },
     "excludeAutopilot": {
       "type": "bool",
-      "defaultValue": true,
-      "metadata": { "description": "When true, devices with physicalIds containing a ZTDID (Autopilot) are skipped." }
+      "defaultValue": true
     },
     "excludeHybridJoined": {
       "type": "bool",
-      "defaultValue": true,
-      "metadata": { "description": "When true, devices with trustType 'ServerAd' (hybrid Entra-joined) are skipped." }
+      "defaultValue": true
     },
     "dryRun": {
       "type": "bool",
       "defaultValue": true,
-      "metadata": { "description": "When true, the workflow only logs candidates and does not modify group membership." }
+      "metadata": { "description": "When true, no PATCH/DELETE is performed - only the report is sent so you can preview impact." }
     }
   },
   "variables": {
@@ -63,21 +68,21 @@
       "apiVersion": "2019-05-01",
       "name": "[parameters('logicAppName')]",
       "location": "[parameters('location')]",
-      "identity": {
-        "type": "SystemAssigned"
-      },
+      "identity": { "type": "SystemAssigned" },
       "properties": {
         "state": "Enabled",
         "definition": {
           "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
           "contentVersion": "1.0.0.0",
           "parameters": {
-            "staleThresholdDays": { "type": "Int" },
-            "graphBaseUri":       { "type": "String" },
-            "reviewGroupObjectId":{ "type": "String" },
-            "excludeAutopilot":   { "type": "Bool" },
-            "excludeHybridJoined":{ "type": "Bool" },
-            "dryRun":             { "type": "Bool" }
+            "staleThresholdDays":            { "type": "Int" },
+            "disabledDeletionThresholdDays": { "type": "Int" },
+            "graphBaseUri":                  { "type": "String" },
+            "emailFromUpn":                  { "type": "String" },
+            "emailToRecipients":             { "type": "String" },
+            "excludeAutopilot":              { "type": "Bool" },
+            "excludeHybridJoined":           { "type": "Bool" },
+            "dryRun":                        { "type": "Bool" }
           },
           "triggers": {
             "Recurrence": {
@@ -89,20 +94,38 @@
             }
           },
           "actions": {
-            "Compute_Cutoff": {
+            "Compute_CutoffDisable": {
               "type": "Compose",
               "inputs": "@{addDays(utcNow(), mul(-1, parameters('staleThresholdDays')))}"
             },
-            "List_Stale_Devices": {
-              "runAfter": { "Compute_Cutoff": [ "Succeeded" ] },
+            "Compute_CutoffDelete": {
+              "type": "Compose",
+              "inputs": "@{addDays(utcNow(), mul(-1, add(parameters('staleThresholdDays'), parameters('disabledDeletionThresholdDays'))))}"
+            },
+            "Initialize_DisabledList": {
+              "runAfter": { "Compute_CutoffDelete": [ "Succeeded" ] },
+              "type": "InitializeVariable",
+              "inputs": { "variables": [ { "name": "disabledList", "type": "Array", "value": [] } ] }
+            },
+            "Initialize_DeletedList": {
+              "runAfter": { "Initialize_DisabledList": [ "Succeeded" ] },
+              "type": "InitializeVariable",
+              "inputs": { "variables": [ { "name": "deletedList", "type": "Array", "value": [] } ] }
+            },
+            "Initialize_ErrorList": {
+              "runAfter": { "Initialize_DeletedList": [ "Succeeded" ] },
+              "type": "InitializeVariable",
+              "inputs": { "variables": [ { "name": "errorList", "type": "Array", "value": [] } ] }
+            },
+            "Get_Total_Device_Count": {
+              "runAfter": { "Initialize_ErrorList": [ "Succeeded" ] },
               "type": "Http",
               "inputs": {
                 "method": "GET",
-                "uri": "@{concat(parameters('graphBaseUri'), '/devices')}",
-                "queries": {
-                  "$select": "id,displayName,deviceId,approximateLastSignInDateTime,accountEnabled,trustType,physicalIds,operatingSystem",
-                  "$filter": "@{concat('approximateLastSignInDateTime le ', outputs('Compute_Cutoff'))}",
-                  "$top": "999"
+                "uri": "@{concat(parameters('graphBaseUri'), '/devices/$count')}",
+                "headers": {
+                  "ConsistencyLevel": "eventual",
+                  "Accept": "text/plain"
                 },
                 "authentication": {
                   "type": "ManagedServiceIdentity",
@@ -110,111 +133,251 @@
                 }
               }
             },
-            "Initialize_Candidates": {
-              "runAfter": { "List_Stale_Devices": [ "Succeeded" ] },
-              "type": "InitializeVariable",
+            "List_Disable_Candidates": {
+              "runAfter": { "Get_Total_Device_Count": [ "Succeeded" ] },
+              "type": "Http",
               "inputs": {
-                "variables": [
-                  { "name": "candidates", "type": "Array", "value": [] }
-                ]
+                "method": "GET",
+                "uri": "@{concat(parameters('graphBaseUri'), '/devices')}",
+                "queries": {
+                  "$select": "id,displayName,deviceId,approximateLastSignInDateTime,accountEnabled,trustType,physicalIds,operatingSystem,operatingSystemVersion",
+                  "$filter": "@{concat('accountEnabled eq true and approximateLastSignInDateTime le ', outputs('Compute_CutoffDisable'))}",
+                  "$top": "999"
+                },
+                "headers": { "ConsistencyLevel": "eventual" },
+                "authentication": {
+                  "type": "ManagedServiceIdentity",
+                  "audience": "https://graph.microsoft.com"
+                }
               }
             },
-            "Filter_Devices": {
-              "runAfter": { "Initialize_Candidates": [ "Succeeded" ] },
+            "List_Delete_Candidates": {
+              "runAfter": { "List_Disable_Candidates": [ "Succeeded" ] },
+              "type": "Http",
+              "inputs": {
+                "method": "GET",
+                "uri": "@{concat(parameters('graphBaseUri'), '/devices')}",
+                "queries": {
+                  "$select": "id,displayName,deviceId,approximateLastSignInDateTime,accountEnabled,trustType,physicalIds,operatingSystem,operatingSystemVersion",
+                  "$filter": "@{concat('accountEnabled eq false and approximateLastSignInDateTime le ', outputs('Compute_CutoffDelete'))}",
+                  "$top": "999"
+                },
+                "headers": { "ConsistencyLevel": "eventual" },
+                "authentication": {
+                  "type": "ManagedServiceIdentity",
+                  "audience": "https://graph.microsoft.com"
+                }
+              }
+            },
+            "Process_Disable_Candidates": {
+              "runAfter": { "List_Delete_Candidates": [ "Succeeded" ] },
               "type": "Foreach",
-              "foreach": "@body('List_Stale_Devices')?['value']",
+              "foreach": "@body('List_Disable_Candidates')?['value']",
               "actions": {
-                "Evaluate_Device": {
+                "Should_Process_Disable": {
                   "type": "If",
                   "expression": {
                     "and": [
                       {
                         "or": [
                           { "equals": [ "@parameters('excludeHybridJoined')", false ] },
-                          { "not": { "equals": [ "@coalesce(items('Filter_Devices')?['trustType'],'')", "ServerAd" ] } }
+                          { "not": { "equals": [ "@coalesce(items('Process_Disable_Candidates')?['trustType'],'')", "ServerAd" ] } }
                         ]
                       },
                       {
                         "or": [
                           { "equals": [ "@parameters('excludeAutopilot')", false ] },
-                          { "equals": [ "@length(filter(coalesce(items('Filter_Devices')?['physicalIds'], createArray()), or(startsWith(item(),'[ZTDID]'), startsWith(item(),'[ZTDId]'))))", 0 ] }
+                          { "equals": [ "@length(filter(coalesce(items('Process_Disable_Candidates')?['physicalIds'], createArray()), startsWith(toLower(item()), '[ztdid]')))", 0 ] }
                         ]
                       }
                     ]
                   },
                   "actions": {
-                    "Append_Candidate": {
+                    "Disable_Device_If_Not_DryRun": {
+                      "type": "If",
+                      "expression": { "equals": [ "@parameters('dryRun')", false ] },
+                      "actions": {
+                        "PATCH_Disable": {
+                          "type": "Http",
+                          "inputs": {
+                            "method": "PATCH",
+                            "uri": "@{concat(parameters('graphBaseUri'), '/devices/', items('Process_Disable_Candidates')?['id'])}",
+                            "headers": { "Content-Type": "application/json" },
+                            "body": { "accountEnabled": false },
+                            "authentication": {
+                              "type": "ManagedServiceIdentity",
+                              "audience": "https://graph.microsoft.com"
+                            }
+                          },
+                          "runAfter": {}
+                        }
+                      },
+                      "else": { "actions": {} }
+                    },
+                    "Record_Disabled": {
+                      "runAfter": { "Disable_Device_If_Not_DryRun": [ "Succeeded", "Skipped" ] },
                       "type": "AppendToArrayVariable",
                       "inputs": {
-                        "name": "candidates",
-                        "value": "@items('Filter_Devices')"
+                        "name": "disabledList",
+                        "value": {
+                          "displayName":  "@items('Process_Disable_Candidates')?['displayName']",
+                          "deviceId":     "@items('Process_Disable_Candidates')?['deviceId']",
+                          "objectId":     "@items('Process_Disable_Candidates')?['id']",
+                          "os":           "@{concat(coalesce(items('Process_Disable_Candidates')?['operatingSystem'],''), ' ', coalesce(items('Process_Disable_Candidates')?['operatingSystemVersion'],''))}",
+                          "trustType":    "@items('Process_Disable_Candidates')?['trustType']",
+                          "lastSignIn":   "@items('Process_Disable_Candidates')?['approximateLastSignInDateTime']"
+                        }
+                      }
+                    },
+                    "Record_Failure_Disable": {
+                      "runAfter": { "Disable_Device_If_Not_DryRun": [ "Failed", "TimedOut" ] },
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "errorList",
+                        "value": {
+                          "stage": "disable",
+                          "displayName": "@items('Process_Disable_Candidates')?['displayName']",
+                          "objectId":    "@items('Process_Disable_Candidates')?['id']"
+                        }
                       }
                     }
                   }
                 }
               },
-              "runtimeConfiguration": {
-                "concurrency": { "repetitions": 20 }
-              }
+              "runtimeConfiguration": { "concurrency": { "repetitions": 10 } }
             },
-            "Add_To_Review_Group": {
-              "runAfter": { "Filter_Devices": [ "Succeeded" ] },
-              "type": "If",
-              "expression": {
-                "and": [
-                  { "equals": [ "@parameters('dryRun')", false ] },
-                  { "greater": [ "@length(variables('candidates'))", 0 ] }
-                ]
-              },
+            "Process_Delete_Candidates": {
+              "runAfter": { "Process_Disable_Candidates": [ "Succeeded" ] },
+              "type": "Foreach",
+              "foreach": "@body('List_Delete_Candidates')?['value']",
               "actions": {
-                "Add_Members": {
-                  "type": "Foreach",
-                  "foreach": "@variables('candidates')",
+                "Should_Process_Delete": {
+                  "type": "If",
+                  "expression": {
+                    "and": [
+                      {
+                        "or": [
+                          { "equals": [ "@parameters('excludeHybridJoined')", false ] },
+                          { "not": { "equals": [ "@coalesce(items('Process_Delete_Candidates')?['trustType'],'')", "ServerAd" ] } }
+                        ]
+                      },
+                      {
+                        "or": [
+                          { "equals": [ "@parameters('excludeAutopilot')", false ] },
+                          { "equals": [ "@length(filter(coalesce(items('Process_Delete_Candidates')?['physicalIds'], createArray()), startsWith(toLower(item()), '[ztdid]')))", 0 ] }
+                        ]
+                      }
+                    ]
+                  },
                   "actions": {
-                    "POST_addRef": {
-                      "type": "Http",
-                      "inputs": {
-                        "method": "POST",
-                        "uri": "@{concat(parameters('graphBaseUri'), '/groups/', parameters('reviewGroupObjectId'), '/members/$ref')}",
-                        "headers": { "Content-Type": "application/json" },
-                        "body": {
-                          "@@odata.id": "@{concat(parameters('graphBaseUri'), '/directoryObjects/', items('Add_Members')?['id'])}"
-                        },
-                        "authentication": {
-                          "type": "ManagedServiceIdentity",
-                          "audience": "https://graph.microsoft.com"
+                    "Delete_Device_If_Not_DryRun": {
+                      "type": "If",
+                      "expression": { "equals": [ "@parameters('dryRun')", false ] },
+                      "actions": {
+                        "DELETE_Device": {
+                          "type": "Http",
+                          "inputs": {
+                            "method": "DELETE",
+                            "uri": "@{concat(parameters('graphBaseUri'), '/devices/', items('Process_Delete_Candidates')?['id'])}",
+                            "authentication": {
+                              "type": "ManagedServiceIdentity",
+                              "audience": "https://graph.microsoft.com"
+                            }
+                          },
+                          "runAfter": {}
                         }
                       },
-                      "runAfter": {}
+                      "else": { "actions": {} }
+                    },
+                    "Record_Deleted": {
+                      "runAfter": { "Delete_Device_If_Not_DryRun": [ "Succeeded", "Skipped" ] },
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "deletedList",
+                        "value": {
+                          "displayName":  "@items('Process_Delete_Candidates')?['displayName']",
+                          "deviceId":     "@items('Process_Delete_Candidates')?['deviceId']",
+                          "objectId":     "@items('Process_Delete_Candidates')?['id']",
+                          "os":           "@{concat(coalesce(items('Process_Delete_Candidates')?['operatingSystem'],''), ' ', coalesce(items('Process_Delete_Candidates')?['operatingSystemVersion'],''))}",
+                          "trustType":    "@items('Process_Delete_Candidates')?['trustType']",
+                          "lastSignIn":   "@items('Process_Delete_Candidates')?['approximateLastSignInDateTime']"
+                        }
+                      }
+                    },
+                    "Record_Failure_Delete": {
+                      "runAfter": { "Delete_Device_If_Not_DryRun": [ "Failed", "TimedOut" ] },
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "errorList",
+                        "value": {
+                          "stage": "delete",
+                          "displayName": "@items('Process_Delete_Candidates')?['displayName']",
+                          "objectId":    "@items('Process_Delete_Candidates')?['id']"
+                        }
+                      }
                     }
-                  },
-                  "runtimeConfiguration": {
-                    "concurrency": { "repetitions": 5 }
                   }
                 }
+              },
+              "runtimeConfiguration": { "concurrency": { "repetitions": 10 } }
+            },
+            "HTML_Disabled_Table": {
+              "runAfter": { "Process_Delete_Candidates": [ "Succeeded" ] },
+              "type": "Table",
+              "inputs": {
+                "format": "HTML",
+                "from": "@variables('disabledList')"
               }
             },
-            "Response_Summary": {
-              "runAfter": { "Add_To_Review_Group": [ "Succeeded", "Skipped" ] },
-              "type": "Compose",
+            "HTML_Deleted_Table": {
+              "runAfter": { "HTML_Disabled_Table": [ "Succeeded" ] },
+              "type": "Table",
               "inputs": {
-                "cutoff": "@outputs('Compute_Cutoff')",
-                "candidateCount": "@length(variables('candidates'))",
-                "dryRun": "@parameters('dryRun')",
-                "reviewGroupObjectId": "@parameters('reviewGroupObjectId')",
-                "candidates": "@variables('candidates')"
+                "format": "HTML",
+                "from": "@variables('deletedList')"
+              }
+            },
+            "Compose_EmailBody": {
+              "runAfter": { "HTML_Deleted_Table": [ "Succeeded" ] },
+              "type": "Compose",
+              "inputs": "<html><body style=\"font-family:Segoe UI,Arial,sans-serif;color:#222\"><h2>Entra Device Hygiene Report</h2><p><b>Run time (UTC):</b> @{utcNow()}<br/><b>Mode:</b> @{if(parameters('dryRun'),'DRY RUN (no changes made)','LIVE')}<br/><b>Disable threshold:</b> @{parameters('staleThresholdDays')} days inactive<br/><b>Delete threshold:</b> @{add(parameters('staleThresholdDays'), parameters('disabledDeletionThresholdDays'))} days inactive (and already disabled)</p><h3>Summary</h3><ul><li><b>Total devices in tenant:</b> @{body('Get_Total_Device_Count')}</li><li><b>Devices disabled this run:</b> @{length(variables('disabledList'))}</li><li><b>Devices deleted this run:</b> @{length(variables('deletedList'))}</li><li><b>Errors:</b> @{length(variables('errorList'))}</li></ul><h3>Disabled devices</h3>@{if(equals(length(variables('disabledList')),0),'<p><i>None</i></p>',body('HTML_Disabled_Table'))}<h3>Deleted devices</h3>@{if(equals(length(variables('deletedList')),0),'<p><i>None</i></p>',body('HTML_Deleted_Table'))}<h3>Errors</h3>@{if(equals(length(variables('errorList')),0),'<p><i>None</i></p>',string(variables('errorList')))}<hr/><p style=\"color:#888;font-size:11px\">Sent by Logic App @{workflow().name} in @{workflow().tags?['resourceGroup']}.</p></body></html>"
+            },
+            "Send_Report_Email": {
+              "runAfter": { "Compose_EmailBody": [ "Succeeded" ] },
+              "type": "Http",
+              "inputs": {
+                "method": "POST",
+                "uri": "@{concat(parameters('graphBaseUri'), '/users/', parameters('emailFromUpn'), '/sendMail')}",
+                "headers": { "Content-Type": "application/json" },
+                "body": {
+                  "message": {
+                    "subject": "@{concat('Entra Device Hygiene - ', if(parameters('dryRun'),'DRY RUN - ',''), 'disabled ', string(length(variables('disabledList'))), ', deleted ', string(length(variables('deletedList'))))}",
+                    "body": {
+                      "contentType": "HTML",
+                      "content": "@{outputs('Compose_EmailBody')}"
+                    },
+                    "toRecipients": "@map(split(parameters('emailToRecipients'), ';'), item(), json(concat('{\"emailAddress\":{\"address\":\"', trim(item()), '\"}}')))"
+                  },
+                  "saveToSentItems": true
+                },
+                "authentication": {
+                  "type": "ManagedServiceIdentity",
+                  "audience": "https://graph.microsoft.com"
+                }
               }
             }
           },
           "outputs": {}
         },
         "parameters": {
-          "staleThresholdDays":  { "value": "[parameters('staleThresholdDays')]" },
-          "graphBaseUri":        { "value": "[variables('graphBaseUri')]" },
-          "reviewGroupObjectId": { "value": "[parameters('reviewGroupObjectId')]" },
-          "excludeAutopilot":    { "value": "[parameters('excludeAutopilot')]" },
-          "excludeHybridJoined": { "value": "[parameters('excludeHybridJoined')]" },
-          "dryRun":              { "value": "[parameters('dryRun')]" }
+          "staleThresholdDays":            { "value": "[parameters('staleThresholdDays')]" },
+          "disabledDeletionThresholdDays": { "value": "[parameters('disabledDeletionThresholdDays')]" },
+          "graphBaseUri":                  { "value": "[variables('graphBaseUri')]" },
+          "emailFromUpn":                  { "value": "[parameters('emailFromUpn')]" },
+          "emailToRecipients":             { "value": "[parameters('emailToRecipients')]" },
+          "excludeAutopilot":              { "value": "[parameters('excludeAutopilot')]" },
+          "excludeHybridJoined":           { "value": "[parameters('excludeHybridJoined')]" },
+          "dryRun":                        { "value": "[parameters('dryRun')]" }
         }
       }
     }
@@ -230,7 +393,7 @@
     },
     "nextSteps": {
       "type": "string",
-      "value": "Grant Graph application permissions Device.Read.All and GroupMember.ReadWrite.All to the managed identity (see scripts/Grant-GraphPermissions.ps1)."
+      "value": "Run Grant-GraphPermissions.ps1 to assign Device.ReadWrite.All and Mail.Send to the managed identity, then flip dryRun=false when ready."
     }
   }
 }

@@ -2,13 +2,15 @@
   "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
   "contentVersion": "1.0.0.0",
   "parameters": {
-    "logicAppName":         { "value": "la-entra-device-hygiene" },
-    "staleThresholdDays":   { "value": 90 },
-    "scheduleFrequency":    { "value": "Day" },
-    "scheduleInterval":     { "value": 1 },
-    "reviewGroupObjectId":  { "value": "<REPLACE-WITH-GROUP-OBJECTID>" },
-    "excludeAutopilot":     { "value": true },
-    "excludeHybridJoined":  { "value": true },
-    "dryRun":               { "value": true }
+    "logicAppName":                  { "value": "la-entra-device-hygiene" },
+    "staleThresholdDays":            { "value": 30 },
+    "disabledDeletionThresholdDays": { "value": 30 },
+    "scheduleFrequency":             { "value": "Day" },
+    "scheduleInterval":              { "value": 1 },
+    "emailFromUpn":                  { "value": "reports@yourtenant.onmicrosoft.com" },
+    "emailToRecipients":             { "value": "admin@yourtenant.com;security@yourtenant.com" },
+    "excludeAutopilot":              { "value": true },
+    "excludeHybridJoined":           { "value": true },
+    "dryRun":                        { "value": true }
   }
 }
