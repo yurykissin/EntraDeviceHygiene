@@ -27,23 +27,43 @@ scripts/
 
 ## Deployment
 
+The flow has three sign-ins because the steps target different control planes (Graph for the group, ARM for the Logic App, Graph again for the app-role grant).
+
+### 0. Verify prerequisites (recommended)
+
 ```powershell
-# 0. (Recommended) Verify prerequisites
-./scripts/Test-Prerequisites.ps1
-# Add -Install to auto-install missing modules, -Upgrade to update outdated ones
-
-# 1. Create the review group (one-time)
-$groupId = ./scripts/Bootstrap-ReviewGroup.ps1
-
-# 2. Deploy the Logic App
-./scripts/Deploy.ps1 -ResourceGroupName rg-entra-hygiene `
-                     -SubscriptionId   <sub-id> `
-                     -ReviewGroupObjectId $groupId
-
-# 3. Grant Graph app-role permissions to the Logic App's managed identity
-#    (the principalId is in the Deploy.ps1 output)
-./scripts/Grant-GraphPermissions.ps1 -ManagedIdentityPrincipalId <principalId>
+./scripts/Test-Prerequisites.ps1            # report only
+./scripts/Test-Prerequisites.ps1 -Install   # install missing modules
 ```
+
+### 1. Create the review group (one-time, Microsoft Graph)
+
+```powershell
+Connect-MgGraph -Scopes 'Group.ReadWrite.All'
+$groupId = ./scripts/Bootstrap-ReviewGroup.ps1
+$groupId   # save this; you'll pass it to step 2
+```
+
+### 2. Deploy the Logic App (Azure ARM)
+
+```powershell
+az login
+./scripts/Deploy.ps1 `
+    -ResourceGroupName    rg-entra-hygiene `
+    -SubscriptionId       <subscription-id> `
+    -ReviewGroupObjectId  $groupId
+```
+
+`Deploy.ps1` writes the deployment outputs, including the Logic App's **managedIdentityPrincipalId** — copy it for the next step.
+
+### 3. Grant Graph permissions to the managed identity (Microsoft Graph)
+
+```powershell
+Connect-MgGraph -Scopes 'AppRoleAssignment.ReadWrite.All','Application.Read.All'
+./scripts/Grant-GraphPermissions.ps1 -ManagedIdentityPrincipalId <principalId-from-step-2>
+```
+
+After this completes, the Logic App's first scheduled run will succeed. To trigger it manually, open the workflow in the Azure portal and choose **Run Trigger → Recurrence**.
 
 ## Parameters
 
