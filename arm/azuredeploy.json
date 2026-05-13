@@ -99,6 +99,7 @@
               "inputs": "@{addDays(utcNow(), mul(-1, parameters('staleThresholdDays')))}"
             },
             "Compute_CutoffDelete": {
+              "runAfter": { "Compute_CutoffDisable": [ "Succeeded" ] },
               "type": "Compose",
               "inputs": "@{addDays(utcNow(), mul(-1, add(parameters('staleThresholdDays'), parameters('disabledDeletionThresholdDays'))))}"
             },
