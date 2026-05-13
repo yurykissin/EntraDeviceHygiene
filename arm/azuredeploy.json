@@ -123,11 +123,13 @@
               "type": "Http",
               "inputs": {
                 "method": "GET",
-                "uri": "@{concat(parameters('graphBaseUri'), '/devices/$count')}",
-                "headers": {
-                  "ConsistencyLevel": "eventual",
-                  "Accept": "text/plain"
+                "uri": "@{concat(parameters('graphBaseUri'), '/devices')}",
+                "queries": {
+                  "$count": "true",
+                  "$top": "1",
+                  "$select": "id"
                 },
+                "headers": { "ConsistencyLevel": "eventual" },
                 "authentication": {
                   "type": "ManagedServiceIdentity",
                   "audience": "https://graph.microsoft.com"
@@ -341,7 +343,7 @@
             "Compose_EmailBody": {
               "runAfter": { "HTML_Deleted_Table": [ "Succeeded" ] },
               "type": "Compose",
-              "inputs": "<html><body style=\"font-family:Segoe UI,Arial,sans-serif;color:#222\"><h2>Entra Device Hygiene Report</h2><p><b>Run time (UTC):</b> @{utcNow()}<br/><b>Mode:</b> @{if(parameters('dryRun'),'DRY RUN (no changes made)','LIVE')}<br/><b>Disable threshold:</b> @{parameters('staleThresholdDays')} days inactive<br/><b>Delete threshold:</b> @{add(parameters('staleThresholdDays'), parameters('disabledDeletionThresholdDays'))} days inactive (and already disabled)</p><h3>Summary</h3><ul><li><b>Total devices in tenant:</b> @{body('Get_Total_Device_Count')}</li><li><b>Devices disabled this run:</b> @{length(variables('disabledList'))}</li><li><b>Devices deleted this run:</b> @{length(variables('deletedList'))}</li><li><b>Errors:</b> @{length(variables('errorList'))}</li></ul><h3>Disabled devices</h3>@{if(equals(length(variables('disabledList')),0),'<p><i>None</i></p>',body('HTML_Disabled_Table'))}<h3>Deleted devices</h3>@{if(equals(length(variables('deletedList')),0),'<p><i>None</i></p>',body('HTML_Deleted_Table'))}<h3>Errors</h3>@{if(equals(length(variables('errorList')),0),'<p><i>None</i></p>',string(variables('errorList')))}<hr/><p style=\"color:#888;font-size:11px\">Sent by Logic App @{workflow().name} in @{workflow().tags?['resourceGroup']}.</p></body></html>"
+              "inputs": "<html><body style=\"font-family:Segoe UI,Arial,sans-serif;color:#222\"><h2>Entra Device Hygiene Report</h2><p><b>Run time (UTC):</b> @{utcNow()}<br/><b>Mode:</b> @{if(parameters('dryRun'),'DRY RUN (no changes made)','LIVE')}<br/><b>Disable threshold:</b> @{parameters('staleThresholdDays')} days inactive<br/><b>Delete threshold:</b> @{add(parameters('staleThresholdDays'), parameters('disabledDeletionThresholdDays'))} days inactive (and already disabled)</p><h3>Summary</h3><ul><li><b>Total devices in tenant:</b> @{coalesce(body('Get_Total_Device_Count')?['@@odata.count'], 'unknown')}</li><li><b>Devices disabled this run:</b> @{length(variables('disabledList'))}</li><li><b>Devices deleted this run:</b> @{length(variables('deletedList'))}</li><li><b>Errors:</b> @{length(variables('errorList'))}</li></ul><h3>Disabled devices</h3>@{if(equals(length(variables('disabledList')),0),'<p><i>None</i></p>',body('HTML_Disabled_Table'))}<h3>Deleted devices</h3>@{if(equals(length(variables('deletedList')),0),'<p><i>None</i></p>',body('HTML_Deleted_Table'))}<h3>Errors</h3>@{if(equals(length(variables('errorList')),0),'<p><i>None</i></p>',string(variables('errorList')))}<hr/><p style=\"color:#888;font-size:11px\">Sent by Logic App @{workflow().name} in @{workflow().tags?['resourceGroup']}.</p></body></html>"
             },
             "Send_Report_Email": {
               "runAfter": { "Compose_EmailBody": [ "Succeeded" ] },
