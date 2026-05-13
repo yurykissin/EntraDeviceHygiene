@@ -19,6 +19,7 @@ arm/
   azuredeploy.json              # Logic App + system-assigned MI
   azuredeploy.parameters.json   # Tweakables (threshold, schedule, group, dryRun)
 scripts/
+  Test-Prerequisites.ps1        # Checks PS version, az CLI, required modules (no duplicate installs)
   Bootstrap-ReviewGroup.ps1     # Creates the Entra review group, returns ObjectId
   Grant-GraphPermissions.ps1    # Grants Device.Read.All + GroupMember.ReadWrite.All to the Logic App MI
   Deploy.ps1                    # az deployment group create wrapper
@@ -27,6 +28,10 @@ scripts/
 ## Deployment
 
 ```powershell
+# 0. (Recommended) Verify prerequisites
+./scripts/Test-Prerequisites.ps1
+# Add -Install to auto-install missing modules, -Upgrade to update outdated ones
+
 # 1. Create the review group (one-time)
 $groupId = ./scripts/Bootstrap-ReviewGroup.ps1
 
