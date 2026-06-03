@@ -20,7 +20,8 @@ param(
     [string]$ParametersFile     = (Join-Path $PSScriptRoot '..' 'arm' 'azuredeploy.parameters.json'),
     [int]$StaleThresholdDays,
     [int]$DisabledDeletionThresholdDays,
-    [Nullable[bool]]$DryRun
+    [Nullable[bool]]$DryRun,
+    [string]$GraphAdminIdentityResourceId
 )
 
 $ErrorActionPreference = 'Stop'
@@ -53,6 +54,7 @@ $overrides = @(
 if ($PSBoundParameters.ContainsKey('StaleThresholdDays'))            { $overrides += "staleThresholdDays=$StaleThresholdDays" }
 if ($PSBoundParameters.ContainsKey('DisabledDeletionThresholdDays')) { $overrides += "disabledDeletionThresholdDays=$DisabledDeletionThresholdDays" }
 if ($PSBoundParameters.ContainsKey('DryRun'))                        { $overrides += ("dryRun={0}" -f $DryRun.ToString().ToLower()) }
+if ($PSBoundParameters.ContainsKey('GraphAdminIdentityResourceId'))  { $overrides += "graphAdminIdentityResourceId=$GraphAdminIdentityResourceId" }
 
 $azArgs += @('--parameters') + $overrides
 $azArgs += @('--query', 'properties.outputs', '--output', 'json')
@@ -70,7 +72,13 @@ $outputs | Format-List
 $principalId = $outputs.managedIdentityPrincipalId.value
 if ($principalId) {
     Write-Host ""
-    Write-Host "Next: grant Microsoft Graph application permissions to the Logic App's managed identity." -ForegroundColor Cyan
-    Write-Host "  Connect-MgGraph -Scopes 'AppRoleAssignment.ReadWrite.All','Application.Read.All'"
-    Write-Host "  ./Grant-GraphPermissions.ps1 -ManagedIdentityPrincipalId $principalId"
+    if ($PSBoundParameters.ContainsKey('GraphAdminIdentityResourceId') -and $GraphAdminIdentityResourceId) {
+        Write-Host "Graph roles granted by deploymentScript. Cycle the workflow state so the MI re-fetches its token:" -ForegroundColor Cyan
+        Write-Host "  az logic workflow update -g $ResourceGroupName -n la-entra-device-hygiene --state Disabled"
+        Write-Host "  az logic workflow update -g $ResourceGroupName -n la-entra-device-hygiene --state Enabled"
+    } else {
+        Write-Host "Next: grant Microsoft Graph application permissions to the Logic App's managed identity." -ForegroundColor Cyan
+        Write-Host "  Connect-MgGraph -Scopes 'AppRoleAssignment.ReadWrite.All','Application.Read.All'"
+        Write-Host "  ./Grant-GraphPermissions.ps1 -ManagedIdentityPrincipalId $principalId"
+    }
 }

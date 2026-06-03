@@ -20,7 +20,8 @@ arm/
   azuredeploy.parameters.json
 scripts/
   Test-Prerequisites.ps1        # PS version, az CLI, required Graph modules
-  Grant-GraphPermissions.ps1    # Device.ReadWrite.All + Mail.Send to the MI
+  Bootstrap-GraphAdminIdentity.ps1  # one-time-per-tenant UAMI for one-click grant
+  Grant-GraphPermissions.ps1    # Device.ReadWrite.All + Mail.Send to the MI (two-step mode)
   Deploy.ps1                    # az deployment wrapper
 ```
 
@@ -36,6 +37,8 @@ scripts/
 | `excludeAutopilot`              | true             | Skip ZTDID devices. |
 | `excludeHybridJoined`           | true             | Skip `trustType = ServerAd` (clean up via on-prem AD instead). |
 | `dryRun`                        | true             | When true: no PATCH / DELETE, only the report is sent. |
+| `graphAdminIdentityResourceId`  | `""` (optional)  | **Set this for one-click deploy.** Resource ID of a UAMI with Graph `AppRoleAssignment.ReadWrite.All` + `Application.Read.All`. When provided, the template grants `Device.ReadWrite.All` + `Mail.Send` to the Logic App's MI automatically. Bootstrap once per tenant with `scripts/Bootstrap-GraphAdminIdentity.ps1`. |
+| `graphRolesToGrant`             | `[Device.ReadWrite.All, Mail.Send]` | Roles granted to the Logic App's MI by the in-template grant step. |
 
 Override any default at deploy time, e.g. `-StaleThresholdDays 60`.
 
@@ -54,7 +57,10 @@ Granted to the Logic App's **system-assigned managed identity**:
 
 ## Deployment
 
-The flow targets three control planes in order: ARM for the Logic App, Microsoft Graph for the role grant, then back to the Logic App to flip `dryRun` off when you're ready.
+The template ships in two modes:
+
+- **One-click (recommended for repeatable deploys):** supply `graphAdminIdentityResourceId` and the template provisions the Logic App **and** grants the Graph application permissions in a single ARM deployment via a `Microsoft.Resources/deploymentScripts` resource.
+- **Two-step (legacy):** deploy without `graphAdminIdentityResourceId`, then run `Grant-GraphPermissions.ps1` manually.
 
 ### 0. Verify prerequisites
 
@@ -63,27 +69,45 @@ The flow targets three control planes in order: ARM for the Logic App, Microsoft
 ./scripts/Test-Prerequisites.ps1 -Install   # install missing modules
 ```
 
-### 1. Deploy the Logic App
+### 1a. (One-time per tenant) Bootstrap the Graph-admin UAMI
+
+Skip this if you already created a UAMI with `AppRoleAssignment.ReadWrite.All` + `Application.Read.All` on Graph.
+
+```powershell
+Connect-MgGraph -Scopes 'AppRoleAssignment.ReadWrite.All','Application.Read.All'
+./scripts/Bootstrap-GraphAdminIdentity.ps1 `
+    -SubscriptionId    <subscription-id> `
+    -ResourceGroupName rg-entra-hygiene
+```
+
+Copy the printed `graphAdminIdentityResourceId` value.
+
+> Caller needs **Privileged Role Administrator** or **Global Administrator** in Entra to grant Graph app roles. Azure side needs Contributor on the RG.
+
+### 1b. Deploy the Logic App (+ grant in one shot)
 
 ```powershell
 az login
 
 ./scripts/Deploy.ps1 `
-    -ResourceGroupName   rg-entra-hygiene `
-    -SubscriptionId      <subscription-id> `
-    -EmailFromUpn        reports@yourtenant.onmicrosoft.com `
-    -EmailToRecipients   'admin@yourtenant.com;security@yourtenant.com'
+    -ResourceGroupName             rg-entra-hygiene `
+    -SubscriptionId                <subscription-id> `
+    -EmailFromUpn                  reports@yourtenant.onmicrosoft.com `
+    -EmailToRecipients             'admin@yourtenant.com;security@yourtenant.com' `
+    -GraphAdminIdentityResourceId  <resource-id-from-step-1a>
 ```
 
 Optional overrides: `-StaleThresholdDays 60`, `-DisabledDeletionThresholdDays 60`, `-DryRun $false`.
 
-Copy the **`managedIdentityPrincipalId`** value from the outputs for the next step.
+If you omit `-GraphAdminIdentityResourceId`, the deployment still succeeds but you must run `Grant-GraphPermissions.ps1` separately (see step 2 below).
 
-### 2. Grant Graph permissions to the managed identity
+### 2. (Two-step mode only) Grant Graph permissions manually
+
+Skip this if you used `-GraphAdminIdentityResourceId` above.
 
 ```powershell
 Connect-MgGraph -Scopes 'AppRoleAssignment.ReadWrite.All','Application.Read.All'
-./scripts/Grant-GraphPermissions.ps1 -ManagedIdentityPrincipalId <principalId-from-step-1>
+./scripts/Grant-GraphPermissions.ps1 -ManagedIdentityPrincipalId <principalId-from-step-1b>
 ```
 
 ### 3. Validate, then go live

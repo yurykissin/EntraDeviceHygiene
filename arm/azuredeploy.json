@@ -57,10 +57,27 @@
       "type": "bool",
       "defaultValue": true,
       "metadata": { "description": "When true, no PATCH/DELETE is performed - only the report is sent so you can preview impact." }
+    },
+    "graphAdminIdentityResourceId": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": { "description": "Optional. Resource ID of a user-assigned managed identity that already holds Microsoft Graph 'AppRoleAssignment.ReadWrite.All' (and 'Application.Read.All'). When supplied, this template also grants Device.ReadWrite.All and Mail.Send to the Logic App's MI via a deploymentScript - true one-click deploy. Leave blank to run Grant-GraphPermissions.ps1 manually afterwards. Bootstrap the UAMI once per tenant with scripts/Bootstrap-GraphAdminIdentity.ps1." }
+    },
+    "graphRolesToGrant": {
+      "type": "array",
+      "defaultValue": [ "Device.ReadWrite.All", "Mail.Send" ],
+      "metadata": { "description": "Graph application roles to grant to the Logic App's MI when graphAdminIdentityResourceId is provided." }
+    },
+    "grantScriptForceUpdateTag": {
+      "type": "string",
+      "defaultValue": "[utcNow()]",
+      "metadata": { "description": "Re-runs the grant deploymentScript whenever the template is re-deployed. Do not set manually." }
     }
   },
   "variables": {
-    "graphBaseUri": "https://graph.microsoft.com/v1.0"
+    "graphBaseUri": "https://graph.microsoft.com/v1.0",
+    "grantRoles": "[not(equals(parameters('graphAdminIdentityResourceId'), ''))]",
+    "grantScriptName": "[concat('grant-graph-roles-', parameters('logicAppName'))]"
   },
   "resources": [
     {
@@ -393,6 +410,32 @@
           "dryRun":                        { "value": "[parameters('dryRun')]" }
         }
       }
+    },
+    {
+      "condition": "[variables('grantRoles')]",
+      "type": "Microsoft.Resources/deploymentScripts",
+      "apiVersion": "2023-08-01",
+      "name": "[variables('grantScriptName')]",
+      "location": "[parameters('location')]",
+      "kind": "AzurePowerShell",
+      "dependsOn": [
+        "[resourceId('Microsoft.Logic/workflows', parameters('logicAppName'))]"
+      ],
+      "identity": {
+        "type": "UserAssigned",
+        "userAssignedIdentities": {
+          "[parameters('graphAdminIdentityResourceId')]": {}
+        }
+      },
+      "properties": {
+        "forceUpdateTag":    "[parameters('grantScriptForceUpdateTag')]",
+        "azPowerShellVersion": "11.5",
+        "timeout":           "PT15M",
+        "retentionInterval": "PT1H",
+        "cleanupPreference": "OnSuccess",
+        "arguments":         "[format('-PrincipalId {0} -Roles \"{1}\"', reference(resourceId('Microsoft.Logic/workflows', parameters('logicAppName')), '2019-05-01', 'Full').identity.principalId, join(parameters('graphRolesToGrant'), ','))]",
+        "scriptContent": "param([Parameter(Mandatory)][string]$PrincipalId,[Parameter(Mandatory)][string]$Roles)\n$ErrorActionPreference='Stop'\n$graphAppId='00000003-0000-0000-c000-000000000000'\n$spResp=Invoke-AzRestMethod -Method GET -Uri \"https://graph.microsoft.com/v1.0/servicePrincipals(appId='$graphAppId')\"\nif($spResp.StatusCode -ge 300){throw \"Graph SP lookup failed: $($spResp.Content)\"}\n$sp=$spResp.Content|ConvertFrom-Json\n$existingResp=Invoke-AzRestMethod -Method GET -Uri \"https://graph.microsoft.com/v1.0/servicePrincipals/$PrincipalId/appRoleAssignments\"\nif($existingResp.StatusCode -ge 300){throw \"Existing assignments lookup failed: $($existingResp.Content)\"}\n$existing=($existingResp.Content|ConvertFrom-Json).value\n$granted=@()\n$skipped=@()\nforeach($roleName in ($Roles -split ',')){\n  $roleName=$roleName.Trim()\n  if(-not $roleName){continue}\n  $appRole=$sp.appRoles|Where-Object{$_.value -eq $roleName -and $_.allowedMemberTypes -contains 'Application'}|Select-Object -First 1\n  if(-not $appRole){Write-Warning \"Role '$roleName' not found on Graph SP - skipping\";continue}\n  if($existing|Where-Object{$_.appRoleId -eq $appRole.id -and $_.resourceId -eq $sp.id}){Write-Host \"Already assigned: $roleName\";$skipped+=$roleName;continue}\n  $body=@{principalId=$PrincipalId;resourceId=$sp.id;appRoleId=$appRole.id}|ConvertTo-Json -Compress\n  $resp=Invoke-AzRestMethod -Method POST -Uri \"https://graph.microsoft.com/v1.0/servicePrincipals/$PrincipalId/appRoleAssignments\" -Payload $body\n  if($resp.StatusCode -ge 300){throw \"Grant '$roleName' failed ($($resp.StatusCode)): $($resp.Content)\"}\n  Write-Host \"Granted: $roleName\"\n  $granted+=$roleName\n}\n$DeploymentScriptOutputs=@{granted=$granted;alreadyAssigned=$skipped;principalId=$PrincipalId}\n"
+      }
     }
   ],
   "outputs": {
@@ -406,7 +449,7 @@
     },
     "nextSteps": {
       "type": "string",
-      "value": "Run Grant-GraphPermissions.ps1 to assign Device.ReadWrite.All and Mail.Send to the managed identity, then flip dryRun=false when ready."
+      "value": "[if(variables('grantRoles'), 'Graph roles granted automatically. Disable/Enable the workflow once so the MI re-fetches its token (tokens cache up to ~24h), then trigger Recurrence on demand.', 'Run Grant-GraphPermissions.ps1 to assign Device.ReadWrite.All and Mail.Send to the managed identity, then flip dryRun=false when ready.')]"
     }
   }
 }
