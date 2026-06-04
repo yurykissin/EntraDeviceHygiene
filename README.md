@@ -19,13 +19,20 @@ Automated stale-device lifecycle for Microsoft Entra ID using a scheduled Azure 
 
 ```
 arm/
-  azuredeploy.json              # Logic App + system-assigned MI
+  azuredeploy.bicep             # source of truth (Microsoft Graph Bicep extension)
+  azuredeploy.json              # compiled output - referenced by the Deploy to Azure button
   azuredeploy.parameters.json
+  workflow-definition.json      # Logic App definition (loaded by Bicep at compile time)
+  bicepconfig.json              # enables the Microsoft Graph Bicep extension
 scripts/
-  Test-Prerequisites.ps1        # PS version, az CLI, required Graph modules
-  Bootstrap-GraphAdminIdentity.ps1  # one-time-per-tenant UAMI for one-click grant
-  Grant-GraphPermissions.ps1    # Device.ReadWrite.All + Mail.Send to the MI (two-step mode)
-  Deploy.ps1                    # az deployment wrapper
+  Test-Prerequisites.ps1        # PS version, az CLI, required modules
+  Deploy.ps1                    # az deployment wrapper (alternative to the portal button)
+```
+
+If you edit `azuredeploy.bicep` or `workflow-definition.json`, recompile:
+
+```bash
+az bicep build --file arm/azuredeploy.bicep
 ```
 
 ## Parameters
@@ -40,80 +47,57 @@ scripts/
 | `excludeAutopilot`              | true             | Skip ZTDID devices. |
 | `excludeHybridJoined`           | true             | Skip `trustType = ServerAd` (clean up via on-prem AD instead). |
 | `dryRun`                        | true             | When true: no PATCH / DELETE, only the report is sent. |
-| `graphAdminIdentityResourceId`  | `""` (optional)  | **Set this for one-click deploy.** Resource ID of a UAMI with Graph `AppRoleAssignment.ReadWrite.All` + `Application.Read.All`. When provided, the template grants `Device.ReadWrite.All` + `Mail.Send` to the Logic App's MI automatically. Bootstrap once per tenant with `scripts/Bootstrap-GraphAdminIdentity.ps1`. |
-| `graphRolesToGrant`             | `[Device.ReadWrite.All, Mail.Send]` | Roles granted to the Logic App's MI by the in-template grant step. |
 
 Override any default at deploy time, e.g. `-StaleThresholdDays 60`.
 
 ## Required Graph application permissions
 
-Granted to the Logic App's **system-assigned managed identity**:
+These are granted to the Logic App's **system-assigned managed identity** automatically by the ARM deployment (via the Microsoft Graph Bicep extension):
 
 | Permission             | Why |
 |------------------------|-----|
 | `Device.ReadWrite.All` | List + disable + delete device objects |
 | `Mail.Send`            | Send the HTML report via `/users/{from}/sendMail` |
 
-`Grant-GraphPermissions.ps1` assigns these. Without them you'll see `Authorization_RequestDenied` in the run history.
-
-> Tip: scope `Mail.Send` to just the sender mailbox with an `New-ApplicationAccessPolicy` in Exchange Online so the MI can only send as that one identity.
+> Tip: scope `Mail.Send` to just the sender mailbox with `New-ApplicationAccessPolicy` in Exchange Online so the MI can only send as that one identity.
 
 ## Deployment
 
-The template ships in two modes:
+The template grants the two Microsoft Graph application roles to the Logic App's managed identity as part of the same ARM deployment - no follow-up scripts required.
 
-- **One-click (recommended for repeatable deploys):** supply `graphAdminIdentityResourceId` and the template provisions the Logic App **and** grants the Graph application permissions in a single ARM deployment via a `Microsoft.Resources/deploymentScripts` resource.
-- **Two-step (legacy):** deploy without `graphAdminIdentityResourceId`, then run `Grant-GraphPermissions.ps1` manually.
+> **The principal running the deployment must be Global Administrator or Privileged Role Administrator.** The Microsoft Graph Bicep extension uses the deployer's token to consent to application roles. Anything less than GA/PRA will fail at the `Microsoft.Graph/appRoleAssignedTo` resources.
 
-### 0. Verify prerequisites
+### Option A - Deploy from the portal (one click)
+
+Use the **Deploy to Azure** button at the top of the README, signed in as GA or PRA. Fill in `emailFromUpn` and `emailToRecipients`, leave other defaults, click Review + create.
+
+### Option B - Deploy from PowerShell / CLI
 
 ```powershell
 ./scripts/Test-Prerequisites.ps1            # report only
 ./scripts/Test-Prerequisites.ps1 -Install   # install missing modules
-```
 
-### 1a. (One-time per tenant) Bootstrap the Graph-admin UAMI
-
-Skip this if you already created a UAMI with `AppRoleAssignment.ReadWrite.All` + `Application.Read.All` on Graph.
-
-```powershell
-Connect-MgGraph -Scopes 'AppRoleAssignment.ReadWrite.All','Application.Read.All'
-./scripts/Bootstrap-GraphAdminIdentity.ps1 `
-    -SubscriptionId    <subscription-id> `
-    -ResourceGroupName rg-entra-hygiene
-```
-
-Copy the printed `graphAdminIdentityResourceId` value.
-
-> Caller needs **Privileged Role Administrator** or **Global Administrator** in Entra to grant Graph app roles. Azure side needs Contributor on the RG.
-
-### 1b. Deploy the Logic App (+ grant in one shot)
-
-```powershell
-az login
+az login --tenant <customer-tenant-id>
 
 ./scripts/Deploy.ps1 `
-    -ResourceGroupName             rg-entra-hygiene `
-    -SubscriptionId                <subscription-id> `
-    -EmailFromUpn                  reports@yourtenant.onmicrosoft.com `
-    -EmailToRecipients             'admin@yourtenant.com;security@yourtenant.com' `
-    -GraphAdminIdentityResourceId  <resource-id-from-step-1a>
+    -ResourceGroupName   rg-entra-hygiene `
+    -SubscriptionId      <subscription-id> `
+    -EmailFromUpn        reports@yourtenant.onmicrosoft.com `
+    -EmailToRecipients   'admin@yourtenant.com;security@yourtenant.com'
 ```
 
 Optional overrides: `-StaleThresholdDays 60`, `-DisabledDeletionThresholdDays 60`, `-DryRun $false`.
 
-If you omit `-GraphAdminIdentityResourceId`, the deployment still succeeds but you must run `Grant-GraphPermissions.ps1` separately (see step 2 below).
+### After deployment - force a managed-identity token refresh
 
-### 2. (Two-step mode only) Grant Graph permissions manually
-
-Skip this if you used `-GraphAdminIdentityResourceId` above.
+Managed-identity tokens are cached up to ~24 hours. After the deployment grants the new Graph roles, cycle the workflow once so the MI re-fetches its token:
 
 ```powershell
-Connect-MgGraph -Scopes 'AppRoleAssignment.ReadWrite.All','Application.Read.All'
-./scripts/Grant-GraphPermissions.ps1 -ManagedIdentityPrincipalId <principalId-from-step-1b>
+az logic workflow update -g rg-entra-hygiene -n la-entra-device-hygiene --state Disabled
+az logic workflow update -g rg-entra-hygiene -n la-entra-device-hygiene --state Enabled
 ```
 
-### 3. Validate, then go live
+### Validate, then go live
 
 - Run the workflow once on demand (**Portal → Logic App → Run Trigger → Recurrence**).
 - Check the inbox for the dry-run report.
@@ -170,12 +154,7 @@ Changes made in the portal will be **overwritten on the next ARM redeploy**, so 
 
 ### Forcing a new managed-identity token
 
-Managed-identity tokens are cached up to ~24 hours. After granting new Graph roles, force a refresh:
-
-```powershell
-az logic workflow update -g rg-entra-hygiene -n la-entra-device-hygiene --state Disabled
-az logic workflow update -g rg-entra-hygiene -n la-entra-device-hygiene --state Enabled
-```
+See "After deployment - force a managed-identity token refresh" above.
 
 ## Safety defaults
 
