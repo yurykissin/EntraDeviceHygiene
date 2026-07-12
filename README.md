@@ -1,9 +1,25 @@
 # Entra Device Hygiene
 
-[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fyurykissin%2FEntraDeviceHygiene%2Fmain%2Farm%2Fazuredeploy.json)
-[![Visualize](https://raw.githubusercontent.com/Azure/azure-quickstart-templates/master/1-CONTRIBUTION-GUIDE/images/visualizebutton.svg)](http://armviz.io/#/?load=https%3A%2F%2Fraw.githubusercontent.com%2Fyurykissin%2FEntraDeviceHygiene%2Fmain%2Farm%2Fazuredeploy.json)
-
 Automated stale-device lifecycle for Microsoft Entra ID using a scheduled Azure Logic App and Microsoft Graph. **One workflow** disables stale devices, deletes ones that have been disabled long enough, and emails an HTML report.
+
+## Deploy — pick one path
+
+Two supported deployment paths ship in this repo. They produce the **same Logic App behavior**; they differ only in **how the workflow authenticates to Microsoft Graph** and where you grant the Graph permissions.
+
+| | **Path A — Managed Identity** ★ recommended | **Path B — App Registration** |
+|---|---|---|
+| Deploy button | [![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fyurykissin%2FEntraDeviceHygiene%2Fmain%2Farm%2Fazuredeploy.json) [![Visualize](https://raw.githubusercontent.com/Azure/azure-quickstart-templates/master/1-CONTRIBUTION-GUIDE/images/visualizebutton.svg)](http://armviz.io/#/?load=https%3A%2F%2Fraw.githubusercontent.com%2Fyurykissin%2FEntraDeviceHygiene%2Fmain%2Farm%2Fazuredeploy.json) | [![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fyurykissin%2FEntraDeviceHygiene%2Fmain%2Farm%2Fazuredeploy-appreg.json) [![Visualize](https://raw.githubusercontent.com/Azure/azure-quickstart-templates/master/1-CONTRIBUTION-GUIDE/images/visualizebutton.svg)](http://armviz.io/#/?load=https%3A%2F%2Fraw.githubusercontent.com%2Fyurykissin%2FEntraDeviceHygiene%2Fmain%2Farm%2Fazuredeploy-appreg.json) |
+| How workflow authenticates to Graph | Logic App **system-assigned managed identity** | Entra **app registration** + client secret (client\_credentials) |
+| Credentials to manage | ❌ None — Azure rotates automatically | ⚠️ Client secret — you rotate on schedule + redeploy |
+| GUI to grant Graph app roles | ❌ No portal UI exists for MIs. Post-deploy step required: PowerShell script *or* 2 POSTs in Graph Explorer *or* wire via CLI. See Path A step 2. | ✅ Yes. Entra portal → App registrations → **API permissions** → Add + **Grant admin consent** (one click) |
+| Portal one-click deploy | ✅ Works | ✅ Works |
+| Post-deploy admin role | GA or PRA (to consent to Graph app roles on the MI) | GA or PRA (to grant admin consent on the app reg) |
+| Secret in deployment inputs | None | `graphClientSecret` (securestring; encrypted at rest on the workflow) |
+| Recommended when | Default choice for unattended, long-running automation. Fewest moving parts. | Your org policy mandates the app-registration model, or you want the fully GUI-driven consent flow. |
+
+> **Neither path can be zero-touch.** Consenting to Graph application permissions always requires a Global Administrator or Privileged Role Administrator, regardless of path.
+
+---
 
 ## What it does (per run)
 
@@ -15,67 +31,67 @@ Automated stale-device lifecycle for Microsoft Entra ID using a scheduled Azure 
 
 `dryRun = true` (the default) sends the report **without making changes**.
 
-## Layout
-
-```
-arm/
-  azuredeploy.bicep             # source of truth
-  azuredeploy.json              # compiled output - referenced by the Deploy to Azure button
-  azuredeploy.parameters.json
-  workflow-definition.json      # Logic App definition (loaded by Bicep at compile time)
-scripts/
-  Test-Prerequisites.ps1        # PS version, az CLI, required modules
-  Deploy.ps1                    # az deployment wrapper (alternative to the portal button)
-  Grant-GraphPermissions.ps1    # post-deploy: grant Graph app roles to the Logic App MI
-  Test-GraphPermissions.ps1     # confirm the grant landed
-```
-
-If you edit `azuredeploy.bicep` or `workflow-definition.json`, recompile:
-
-```bash
-az bicep build --file arm/azuredeploy.bicep
-```
-
-## Parameters
-
-| Name                            | Default          | Notes |
-|---------------------------------|------------------|-------|
-| `staleThresholdDays`            | 30               | Inactivity threshold to **disable** a device. Override at deploy time. |
-| `disabledDeletionThresholdDays` | 30               | Extra inactivity beyond `staleThresholdDays` after which a disabled device is **deleted**. |
-| `scheduleFrequency` / `scheduleInterval` | Day / 1 | Recurrence. |
-| `emailFromUpn`                  | — (required)     | Sender mailbox UPN. The MI needs `Mail.Send` (optionally scoped via an ApplicationAccessPolicy). |
-| `emailToRecipients`             | — (required)     | Semicolon-separated recipient list. |
-| `excludeAutopilot`              | true             | Skip ZTDID devices. |
-| `excludeHybridJoined`           | true             | Skip `trustType = ServerAd` (clean up via on-prem AD instead). |
-| `dryRun`                        | true             | When true: no PATCH / DELETE, only the report is sent. |
-
-Override any default at deploy time, e.g. `-StaleThresholdDays 60`.
-
 ## Required Graph application permissions
 
-These are granted to the Logic App's **system-assigned managed identity** as a one-time post-deploy step (see below):
+Both paths need the same two permissions granted to whichever principal the workflow authenticates as:
 
 | Permission             | Why |
 |------------------------|-----|
 | `Device.ReadWrite.All` | List + disable + delete device objects |
 | `Mail.Send`            | Send the HTML report via `/users/{from}/sendMail` |
 
-> Tip: scope `Mail.Send` to just the sender mailbox with `New-ApplicationAccessPolicy` in Exchange Online so the MI can only send as that one identity.
+> Tip: scope `Mail.Send` to just the sender mailbox with `New-ApplicationAccessPolicy` in Exchange Online so the principal can only send as that one identity.
 
-## Deployment
+## Layout
 
-Deployment is two short steps: (1) deploy the ARM template (portal button or CLI), (2) grant the two Graph app roles to the resulting managed identity. Step 2 must be a separate step because Azure Portal-triggered deployments cannot obtain a Microsoft Graph token — there is no way to grant Graph app roles from ARM in a portal one-click deploy.
+```
+arm/
+  azuredeploy.bicep                     # Path A: source of truth (managed identity)
+  azuredeploy.json                      # Path A: compiled — Deploy to Azure button target
+  azuredeploy-appreg.bicep              # Path B: source of truth (app registration)
+  azuredeploy-appreg.json               # Path B: compiled — Deploy to Azure button target
+  workflow-definition.json              # Path A workflow (MI auth on every HTTP action)
+  workflow-definition-appreg.json       # Path B workflow (ActiveDirectoryOAuth auth on every HTTP action)
+  azuredeploy.parameters.json
+scripts/
+  Test-Prerequisites.ps1                # PS version, az CLI, required modules
+  Deploy.ps1                            # CLI wrapper — supports -AuthMode ManagedIdentity|AppRegistration
+  Grant-GraphPermissions.ps1            # Path A only: grant Graph roles to the Logic App MI
+  Test-GraphPermissions.ps1             # Path A only: confirm the grant landed
+```
 
-> **The principal running step 2 must be Global Administrator or Privileged Role Administrator** (required to consent to Graph application roles).
+If you edit any `.bicep` or `workflow-definition*.json`, recompile:
 
-### Step 1a - Deploy from the portal (one click)
+```bash
+az bicep build --file arm/azuredeploy.bicep
+az bicep build --file arm/azuredeploy-appreg.bicep
+```
 
-Use the **Deploy to Azure** button at the top of the README. Fill in `emailFromUpn` and `emailToRecipients`, leave other defaults, click Review + create.
+## Parameters (shared by both paths unless noted)
 
-When the deployment finishes, copy the **`managedIdentityPrincipalId`** value from the deployment Outputs — you need it for step 2.
+| Name                                     | Default        | Notes |
+|------------------------------------------|----------------|-------|
+| `staleThresholdDays`                     | 30             | Inactivity threshold to **disable** a device. |
+| `disabledDeletionThresholdDays`          | 30             | Extra inactivity beyond `staleThresholdDays` after which a disabled device is **deleted**. |
+| `scheduleFrequency` / `scheduleInterval` | Day / 1        | Recurrence. |
+| `emailFromUpn`                           | — (required)   | Sender mailbox UPN. Principal needs `Mail.Send` (optionally scoped via an ApplicationAccessPolicy). |
+| `emailToRecipients`                      | — (required)   | Semicolon-separated recipient list. |
+| `excludeAutopilot`                       | true           | Skip ZTDID devices. |
+| `excludeHybridJoined`                    | true           | Skip `trustType = ServerAd` (clean up via on-prem AD instead). |
+| `dryRun`                                 | true           | When true: no PATCH / DELETE, only the report is sent. |
+| `graphTenantId` *(Path B only)*          | current tenant | Tenant that hosts the app registration. |
+| `graphClientId` *(Path B only)*          | — (required)   | Application (client) ID of the app registration. |
+| `graphClientSecret` *(Path B only)*      | — (required)   | Client secret; stored as securestring on the workflow. |
 
-### Step 1b - Deploy from PowerShell / CLI (alternative)
+---
 
+## Path A — Managed Identity (recommended)
+
+### Step A1 — Deploy the Logic App
+
+**Option 1: Portal one-click.** Click Path A's **Deploy to Azure** button above. Fill in `emailFromUpn` and `emailToRecipients`, leave other defaults, click **Review + create**. When the deployment finishes, open the deployment **Outputs** and copy `managedIdentityPrincipalId` — you need it if you use the Graph Explorer route in Step A2.
+
+**Option 2: PowerShell / CLI.**
 ```powershell
 ./scripts/Test-Prerequisites.ps1            # report only
 ./scripts/Test-Prerequisites.ps1 -Install   # install missing modules
@@ -88,37 +104,107 @@ az login --tenant <customer-tenant-id>
     -EmailFromUpn        reports@yourtenant.onmicrosoft.com `
     -EmailToRecipients   'admin@yourtenant.com;security@yourtenant.com'
 ```
+Optional: `-StaleThresholdDays 60`, `-DisabledDeletionThresholdDays 60`, `-DryRun $false`.
 
-Optional overrides: `-StaleThresholdDays 60`, `-DisabledDeletionThresholdDays 60`, `-DryRun $false`.
+### Step A2 — Grant Graph app roles to the Managed Identity
 
-### Step 2 - Grant Graph permissions to the managed identity
+> Must run as **Global Administrator** or **Privileged Role Administrator**. There is **no Azure Portal UI** for granting Graph application permissions to a managed identity — this is a long-standing Microsoft gap. Pick one of the three methods below.
 
-Sign in as **Global Administrator** or **Privileged Role Administrator** and run:
-
+**Method 1: repo script (fastest).**
 ```powershell
 ./scripts/Grant-GraphPermissions.ps1 -LogicAppName la-entra-device-hygiene -ResourceGroupName rg-entra-hygiene
-# verify
 ./scripts/Test-GraphPermissions.ps1  -LogicAppName la-entra-device-hygiene -ResourceGroupName rg-entra-hygiene
 ```
 
-This grants `Device.ReadWrite.All` + `Mail.Send` to the Logic App's system-assigned managed identity. Idempotent — safe to re-run.
+**Method 2: Microsoft Graph Explorer (no local tooling, GUI-driven form).**
+1. Open <https://developer.microsoft.com/graph/graph-explorer>, sign in as GA/PRA.
+2. Click the profile icon → **Consent to permissions** → tick `AppRoleAssignment.ReadWrite.All` and `Application.Read.All` → Consent.
+3. `GET https://graph.microsoft.com/v1.0/servicePrincipals(appId='00000003-0000-0000-c000-000000000000')?$select=id` → copy `id` value → call it `GRAPH_SP_ID`.
+4. `POST https://graph.microsoft.com/v1.0/servicePrincipals/<managedIdentityPrincipalId>/appRoleAssignments` body:
+   ```json
+   { "principalId": "<managedIdentityPrincipalId>", "resourceId": "<GRAPH_SP_ID>", "appRoleId": "1138cb37-bd11-4084-a2b7-9f71582aeddb" }
+   ```
+5. Same URL again, body with `appRoleId` = `b633e1c5-b582-4048-a93e-9f11b44c7e96` (Mail.Send).
+6. Both calls return `201 Created`.
 
-If you prefer a GUI, you can do the same in [Microsoft Graph Explorer](https://developer.microsoft.com/graph/graph-explorer) by POSTing to `/servicePrincipals/{miObjectId}/appRoleAssignments` twice (once per role) — but the script is faster.
+**Method 3: Azure CLI one-liners** (needs `az` + GA/PRA):
+```powershell
+$mi        = az ad sp show --id $managedIdentityPrincipalId --query id -o tsv
+$graphSpId = az ad sp show --id 00000003-0000-0000-c000-000000000000 --query id -o tsv
+foreach ($rid in @('1138cb37-bd11-4084-a2b7-9f71582aeddb','b633e1c5-b582-4048-a93e-9f11b44c7e96')) {
+    az rest --method POST `
+        --uri "https://graph.microsoft.com/v1.0/servicePrincipals/$mi/appRoleAssignments" `
+        --body "{`"principalId`":`"$mi`",`"resourceId`":`"$graphSpId`",`"appRoleId`":`"$rid`"}"
+}
+```
 
-### Step 3 - Force a managed-identity token refresh
+### Step A3 — Force a managed-identity token refresh
 
-Managed-identity tokens are cached up to ~24 hours. After granting the new Graph roles, cycle the workflow once so the MI re-fetches its token:
-
+MI tokens cache up to ~24 hours. After granting the new Graph roles, cycle the workflow so the MI re-fetches its token:
 ```powershell
 az logic workflow update -g rg-entra-hygiene -n la-entra-device-hygiene --state Disabled
 az logic workflow update -g rg-entra-hygiene -n la-entra-device-hygiene --state Enabled
 ```
 
-### Validate, then go live
+### Step A4 — Validate, then go live
+- Trigger the workflow once on demand (**Portal → Logic App → Run Trigger → Recurrence**).
+- Confirm the dry-run report arrives in the inbox.
+- When it looks right, redeploy with `-DryRun $false` (or edit `dryRun` in the portal Logic App parameters).
 
-- Run the workflow once on demand (**Portal → Logic App → Run Trigger → Recurrence**).
-- Check the inbox for the dry-run report.
-- When the report looks right, change `dryRun` to `false` (see *Changing parameters* below).
+---
+
+## Path B — App Registration
+
+> ⚠️ **You are now responsible for the client secret.** Store it securely, rotate on your org schedule (typically 6–24 months), redeploy the Logic App when you rotate. If you lose the secret, the workflow's Graph calls will 401 until you rotate + redeploy. If Key Vault-based secret rotation is required, prefer **Path A** — this repo does not currently include a Key Vault reference variant.
+
+### Step B1 — Create the Entra app registration
+
+1. Entra admin center → **App registrations** → **New registration**.
+2. Name: `sp-entra-device-hygiene` (or your convention). Supported account types: **Single tenant**. No redirect URI needed. Register.
+3. On the **Overview** blade, copy **Application (client) ID** and **Directory (tenant) ID**.
+
+### Step B2 — Grant Graph app permissions (GUI, one click)
+
+1. Same app reg → **API permissions** → **Add a permission** → **Microsoft Graph** → **Application permissions** → tick `Device.ReadWrite.All` and `Mail.Send` → **Add permissions**.
+2. Click **Grant admin consent for \<tenant\>** at the top. Status must go green for both rows. **This requires Global Administrator or Privileged Role Administrator.**
+
+### Step B3 — Create a client secret
+
+1. Same app reg → **Certificates & secrets** → **Client secrets** → **New client secret**.
+2. Description: `entra-device-hygiene`. Expires: pick per your org policy (max 24 months). Add.
+3. **Copy the Value immediately** — Entra shows it exactly once. Also note the expiry date; set a calendar reminder to rotate + redeploy before then.
+
+### Step B4 — Deploy the Logic App
+
+**Option 1: Portal one-click.** Click Path B's **Deploy to Azure** button above. Fill in `emailFromUpn`, `emailToRecipients`, `graphClientId` (from step B1), `graphClientSecret` (from step B3). `graphTenantId` defaults to the deployment subscription's tenant — override only if the app reg lives in a different tenant. **Review + create**.
+
+**Option 2: PowerShell / CLI.**
+```powershell
+$secret = Read-Host -AsSecureString "Client secret"
+
+./scripts/Deploy.ps1 `
+    -AuthMode            AppRegistration `
+    -ResourceGroupName   rg-entra-hygiene `
+    -SubscriptionId      <subscription-id> `
+    -EmailFromUpn        reports@yourtenant.onmicrosoft.com `
+    -EmailToRecipients   'admin@yourtenant.com;security@yourtenant.com' `
+    -GraphClientId       <app-registration-client-id> `
+    -GraphClientSecret   $secret
+```
+
+### Step B5 — Validate, then go live
+- Trigger the workflow once on demand.
+- Confirm the dry-run report arrives.
+- Redeploy with `-DryRun $false` when ready.
+
+### Rotating the client secret (Path B only)
+
+1. Create a new secret in the app registration (repeat Step B3).
+2. Redeploy the Logic App with the new secret (repeat Step B4). Both secrets are valid until the old one's expiry, so this is zero-downtime.
+3. Delete the old secret.
+
+---
+
 
 ## Changing parameters after deployment
 
