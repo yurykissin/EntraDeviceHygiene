@@ -1,14 +1,36 @@
 # Grants Microsoft Graph application permissions to the Logic App's system-assigned managed identity.
 # Required because Logic Apps cannot consent to Graph app roles via the portal UI.
+#
+# Pass either the Logic App's name + resource group (script looks up the MI), or the MI's
+# principal ID directly.
 
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'ByLogicApp')]
 param(
-    [Parameter(Mandatory)] [string]$ManagedIdentityPrincipalId,
+    [Parameter(Mandatory, ParameterSetName = 'ByLogicApp')] [string]$LogicAppName,
+    [Parameter(Mandatory, ParameterSetName = 'ByLogicApp')] [string]$ResourceGroupName,
+    [Parameter(Mandatory, ParameterSetName = 'ByPrincipal')] [string]$ManagedIdentityPrincipalId,
     [string[]]$GraphAppRoles = @('Device.ReadWrite.All','Mail.Send')
 )
 
 $ErrorActionPreference = 'Stop'
 Import-Module Microsoft.Graph.Applications -ErrorAction Stop
+
+if ($PSCmdlet.ParameterSetName -eq 'ByLogicApp') {
+    if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
+        throw "Azure CLI ('az') not found. Install it, or pass -ManagedIdentityPrincipalId instead."
+    }
+    Write-Host "Looking up managed identity for $LogicAppName in $ResourceGroupName..." -ForegroundColor Cyan
+    $ManagedIdentityPrincipalId = az resource show `
+        --resource-group $ResourceGroupName `
+        --name           $LogicAppName `
+        --resource-type  'Microsoft.Logic/workflows' `
+        --query          'identity.principalId' `
+        --output         tsv
+    if (-not $ManagedIdentityPrincipalId) {
+        throw "Could not resolve managed identity for Logic App '$LogicAppName' in resource group '$ResourceGroupName'. Ensure it exists and has System Assigned identity enabled."
+    }
+    Write-Host "  principalId = $ManagedIdentityPrincipalId" -ForegroundColor Cyan
+}
 
 if (-not (Get-MgContext)) {
     Connect-MgGraph -Scopes "AppRoleAssignment.ReadWrite.All","Application.Read.All" | Out-Null
