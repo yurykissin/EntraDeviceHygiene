@@ -1,12 +1,11 @@
 {
   "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
-  "languageVersion": "2.0",
   "contentVersion": "1.0.0.0",
   "metadata": {
     "_generator": {
       "name": "bicep",
       "version": "0.43.8.12551",
-      "templateHash": "8383744995950616986"
+      "templateHash": "13853965474391058689"
     }
   },
   "parameters": {
@@ -592,19 +591,10 @@
       },
       "outputs": {}
     },
-    "graphBaseUri": "https://graph.microsoft.com/v1.0",
-    "graphAppId": "00000003-0000-0000-c000-000000000000",
-    "deviceReadWriteAllRoleId": "1138cb37-bd11-4084-a2b7-9f71582aeddb",
-    "mailSendRoleId": "b633e1c5-b582-4048-a93e-9f11b44c7e96"
+    "graphBaseUri": "https://graph.microsoft.com/v1.0"
   },
-  "imports": {
-    "microsoftGraphV1": {
-      "provider": "MicrosoftGraph",
-      "version": "0.1.8-preview"
-    }
-  },
-  "resources": {
-    "workflow": {
+  "resources": [
+    {
       "type": "Microsoft.Logic/workflows",
       "apiVersion": "2019-05-01",
       "name": "[parameters('logicAppName')]",
@@ -642,42 +632,8 @@
           }
         }
       }
-    },
-    "graphSp": {
-      "existing": true,
-      "import": "microsoftGraphV1",
-      "type": "Microsoft.Graph/servicePrincipals@v1.0",
-      "properties": {
-        "appId": "[variables('graphAppId')]"
-      }
-    },
-    "grantDeviceReadWriteAll": {
-      "import": "microsoftGraphV1",
-      "type": "Microsoft.Graph/appRoleAssignedTo@v1.0",
-      "properties": {
-        "appRoleId": "[variables('deviceReadWriteAllRoleId')]",
-        "principalId": "[reference('workflow', '2019-05-01', 'full').identity.principalId]",
-        "resourceId": "[reference('graphSp').id]"
-      },
-      "dependsOn": [
-        "graphSp",
-        "workflow"
-      ]
-    },
-    "grantMailSend": {
-      "import": "microsoftGraphV1",
-      "type": "Microsoft.Graph/appRoleAssignedTo@v1.0",
-      "properties": {
-        "appRoleId": "[variables('mailSendRoleId')]",
-        "principalId": "[reference('workflow', '2019-05-01', 'full').identity.principalId]",
-        "resourceId": "[reference('graphSp').id]"
-      },
-      "dependsOn": [
-        "graphSp",
-        "workflow"
-      ]
     }
-  },
+  ],
   "outputs": {
     "logicAppName": {
       "type": "string",
@@ -685,11 +641,11 @@
     },
     "managedIdentityPrincipalId": {
       "type": "string",
-      "value": "[reference('workflow', '2019-05-01', 'full').identity.principalId]"
+      "value": "[reference(resourceId('Microsoft.Logic/workflows', parameters('logicAppName')), '2019-05-01', 'full').identity.principalId]"
     },
     "nextSteps": {
       "type": "string",
-      "value": "Graph roles granted automatically. Cycle the workflow Disabled -> Enabled to refresh the MI token (tokens cache up to ~24h), then trigger Recurrence on demand. Flip dryRun=false when ready."
+      "value": "IMPORTANT: Grant Graph roles (Device.ReadWrite.All, Mail.Send) to managedIdentityPrincipalId - see README. Then cycle the workflow Disabled -> Enabled to refresh the MI token."
     }
   }
 }

@@ -2,15 +2,11 @@
 // that have been disabled long enough, then emails an HTML report. Uses a system-assigned
 // managed identity calling Microsoft Graph.
 //
-// The Microsoft Graph Bicep extension assigns the two required application roles
-// (Device.ReadWrite.All + Mail.Send) to the Logic App's managed identity in the same
-// deployment - the whole runbook is a single one-click ARM deploy.
-//
-// REQUIRED: The principal running this deployment must be a Global Administrator or
-// Privileged Role Administrator (Graph extension uses the deployer's token to consent
-// to application roles on the managed identity).
-
-extension microsoftGraphV1
+// The Deploy to Azure button deploys the Logic App with its system-assigned managed identity.
+// A brief post-deploy step is required to grant the two Microsoft Graph application roles
+// (Device.ReadWrite.All + Mail.Send) to the managed identity - see README section "Grant
+// Graph permissions after deployment". This split is unavoidable: Azure Portal-triggered
+// deployments cannot grant Graph app roles from ARM.
 
 @description('Logic App name.')
 param logicAppName string = 'la-entra-device-hygiene'
@@ -48,11 +44,6 @@ param excludeHybridJoined bool = true
 param dryRun bool = true
 
 var graphBaseUri = 'https://graph.microsoft.com/v1.0'
-var graphAppId   = '00000003-0000-0000-c000-000000000000'
-
-// Static Microsoft Graph application role IDs (immutable across all tenants)
-var deviceReadWriteAllRoleId = '1138cb37-bd11-4084-a2b7-9f71582aeddb'
-var mailSendRoleId           = 'b633e1c5-b582-4048-a93e-9f11b44c7e96'
 
 resource workflow 'Microsoft.Logic/workflows@2019-05-01' = {
   name:     logicAppName
@@ -74,25 +65,6 @@ resource workflow 'Microsoft.Logic/workflows@2019-05-01' = {
   }
 }
 
-// Microsoft Graph service principal in this tenant (object ID needed as resourceId on the role assignments)
-resource graphSp 'Microsoft.Graph/servicePrincipals@v1.0' existing = {
-  appId: graphAppId
-}
-
-// Device.ReadWrite.All -> Logic App MI
-resource grantDeviceReadWriteAll 'Microsoft.Graph/appRoleAssignedTo@v1.0' = {
-  appRoleId:   deviceReadWriteAllRoleId
-  principalId: workflow.identity.principalId
-  resourceId:  graphSp.id
-}
-
-// Mail.Send -> Logic App MI
-resource grantMailSend 'Microsoft.Graph/appRoleAssignedTo@v1.0' = {
-  appRoleId:   mailSendRoleId
-  principalId: workflow.identity.principalId
-  resourceId:  graphSp.id
-}
-
 output logicAppName               string = logicAppName
 output managedIdentityPrincipalId string = workflow.identity.principalId
-output nextSteps                  string = 'Graph roles granted automatically. Cycle the workflow Disabled -> Enabled to refresh the MI token (tokens cache up to ~24h), then trigger Recurrence on demand. Flip dryRun=false when ready.'
+output nextSteps                  string = 'IMPORTANT: Grant Graph roles (Device.ReadWrite.All, Mail.Send) to managedIdentityPrincipalId - see README. Then cycle the workflow Disabled -> Enabled to refresh the MI token.'
