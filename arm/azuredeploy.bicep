@@ -45,13 +45,29 @@ param dryRun bool = true
 
 var graphBaseUri = 'https://graph.microsoft.com/v1.0'
 
+var workflowDefinitionRaw = loadJsonContent('workflow-definition.json')
+
+// loadJsonContent() ships the raw JSON to Logic Apps validation before ARM evaluates it,
+// so the outer-ARM "[parameters('scheduleFrequency')]" strings baked into the file get
+// rejected as invalid FlowRecurrenceFrequency values. Overwrite the recurrence in Bicep.
+var workflowDefinition = union(workflowDefinitionRaw, {
+  triggers: union(workflowDefinitionRaw.triggers, {
+    Recurrence: union(workflowDefinitionRaw.triggers.Recurrence, {
+      recurrence: {
+        frequency: scheduleFrequency
+        interval:  scheduleInterval
+      }
+    })
+  })
+})
+
 resource workflow 'Microsoft.Logic/workflows@2019-05-01' = {
   name:     logicAppName
   location: location
   identity: { type: 'SystemAssigned' }
   properties: {
     state: 'Enabled'
-    definition: loadJsonContent('workflow-definition.json')
+    definition: workflowDefinition
     parameters: {
       staleThresholdDays:            { value: staleThresholdDays }
       disabledDeletionThresholdDays: { value: disabledDeletionThresholdDays }

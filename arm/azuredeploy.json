@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.43.8.12551",
-      "templateHash": "13853965474391058689"
+      "templateHash": "10763616334219956404"
     }
   },
   "parameters": {
@@ -591,7 +591,9 @@
       },
       "outputs": {}
     },
-    "graphBaseUri": "https://graph.microsoft.com/v1.0"
+    "graphBaseUri": "https://graph.microsoft.com/v1.0",
+    "workflowDefinitionRaw": "[variables('$fxv#0')]",
+    "workflowDefinition": "[union(variables('workflowDefinitionRaw'), createObject('triggers', union(variables('workflowDefinitionRaw').triggers, createObject('Recurrence', union(variables('workflowDefinitionRaw').triggers.Recurrence, createObject('recurrence', createObject('frequency', parameters('scheduleFrequency'), 'interval', parameters('scheduleInterval'))))))))]"
   },
   "resources": [
     {
@@ -604,7 +606,7 @@
       },
       "properties": {
         "state": "Enabled",
-        "definition": "[variables('$fxv#0')]",
+        "definition": "[variables('workflowDefinition')]",
         "parameters": {
           "staleThresholdDays": {
             "value": "[parameters('staleThresholdDays')]"
